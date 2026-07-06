@@ -1,0 +1,18 @@
+[Unit]
+Description=Tmac VPS Probe Panel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/vps-probe
+ExecStart=/usr/bin/python3 /opt/vps-probe/panel.py
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

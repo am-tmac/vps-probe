@@ -1,0 +1,25 @@
+{
+  "listen": "127.0.0.1",
+  "port": 8088,
+  "auth_user": "admin",
+  "auth_pass": "change-me",
+  "refresh_seconds": 20,
+  "nodes": [
+    {
+      "name": "RackNerd LA",
+      "type": "local",
+      "flag": "🇺🇸",
+      "region": "Los Angeles, US"
+    },
+    {
+      "name": "BageVM Tokyo",
+      "type": "ssh",
+      "host": "example.com",
+      "port": 22,
+      "user": "root",
+      "password": "change-me",
+      "flag": "🇯🇵",
+      "region": "Tokyo, JP"
+    }
+  ]
+}
