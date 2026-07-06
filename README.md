@@ -1,6 +1,8 @@
-# Tmac VPS Probe
+# vps-probe
 
-A tiny no-dependency VPS status panel built with Python standard library.
+A tiny no-dependency VPS status panel built with the Python standard library.
+
+Repository: https://github.com/am-tmac/vps-probe
 
 Features:
 
