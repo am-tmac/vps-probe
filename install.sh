@@ -39,9 +39,12 @@ tr() {
       public_panel) echo "面板地址";;
       agent_ready) echo "被控端探针已安装并保持 WSS 长连接。";;
       controller_ready) echo "主控端已安装。请编辑配置添加被控端 Token。";;
-      caddy_question) echo "配置 Caddy HTTPS 反代？";;
-      caddy_domain) echo "面板域名";;
-      caddy_note) echo "不会自动安装 Caddy，也不会覆盖现有 Caddyfile。";;
+      caddy_question) echo "配置域名与自动 HTTPS 证书？";;
+      caddy_domain) echo "指向此主控端的域名";;
+      caddy_note) echo "脚本将安装 Caddy、创建独立站点配置，并自动申请 Let's Encrypt 证书。域名的 A/AAAA 记录必须已指向当前服务器，且 80/443 端口可访问。";;
+      dns_missing) echo "未检测到此域名的 DNS 记录，证书签发可能失败。请先确认 DNS 已解析到本机。";;
+      domain_exists) echo "此域名已经存在于 Caddy 配置中，脚本不会覆盖它。";;
+      https_ready) echo "HTTPS 与 WSS 验证成功。";;
       config_path) echo "主控端配置文件";;
       removed) echo "已移除 Jager Monitor 文件和 systemd 服务。未卸载 Python 或 Caddy。";;
       confirm_uninstall) echo "确认卸载？此操作会删除本组件配置与缓存";;
@@ -73,9 +76,12 @@ tr() {
       public_panel) echo "Panel URL";;
       agent_ready) echo "Agent installed and keeping a persistent WSS connection.";;
       controller_ready) echo "Controller installed. Edit its config to add agent tokens.";;
-      caddy_question) echo "Configure a Caddy HTTPS reverse proxy?";;
-      caddy_domain) echo "Panel domain";;
-      caddy_note) echo "Caddy will not be installed and the existing Caddyfile will not be overwritten automatically.";;
+      caddy_question) echo "Configure domain and automatic HTTPS certificate?";;
+      caddy_domain) echo "Domain pointing to this controller";;
+      caddy_note) echo "The script installs Caddy, creates an isolated site config, and automatically obtains a Let's Encrypt certificate. The domain A/AAAA record must already point to this server and ports 80/443 must be reachable.";;
+      dns_missing) echo "No DNS record was detected for this domain. Certificate issuance may fail; confirm DNS points to this server first.";;
+      domain_exists) echo "This domain already exists in the Caddy configuration. The script will not overwrite it.";;
+      https_ready) echo "HTTPS and WSS verification succeeded.";;
       config_path) echo "Controller config";;
       removed) echo "Removed Jager Monitor files and systemd units. Python and Caddy were not removed.";;
       confirm_uninstall) echo "Confirm uninstall? This deletes this component's config and state";;
@@ -129,6 +135,59 @@ generate_token() {
   fi
 }
 
+configure_https() {
+  local domain caddy_file site_file main_file
+  echo "$(tr caddy_note)"
+  if ! confirm caddy_question; then
+    return
+  fi
+
+  domain=$(ask "$(tr caddy_domain)" "probe.example.com")
+  if [[ ! "$domain" =~ ^[A-Za-z0-9.-]+$ ]] || [[ "$domain" != *.* ]]; then
+    echo "Invalid domain: $domain" >&2
+    return 1
+  fi
+  if ! getent ahosts "$domain" >/dev/null 2>&1; then
+    echo "$(tr dns_missing)" >&2
+  fi
+
+  DEBIAN_FRONTEND=noninteractive apt-get install -y caddy
+  main_file="/etc/caddy/Caddyfile"
+  site_file="/etc/caddy/jager-monitor.caddy"
+  install -d -m 0755 /etc/caddy
+  touch "$main_file"
+
+  if grep -Fqx "$domain {" "$main_file" "$site_file" 2>/dev/null; then
+    echo "$(tr domain_exists)" >&2
+    return 1
+  fi
+  if ! grep -Fqx 'import /etc/caddy/*.caddy' "$main_file"; then
+    printf '\nimport /etc/caddy/*.caddy\n' >> "$main_file"
+  fi
+
+  cat > "$site_file" <<EOF
+$domain {
+    encode gzip zstd
+    @websocket path /ws
+    reverse_proxy @websocket 127.0.0.1:8089
+    reverse_proxy 127.0.0.1:8088
+}
+EOF
+  chmod 644 "$site_file"
+  caddy fmt --overwrite "$main_file"
+  caddy fmt --overwrite "$site_file"
+  caddy validate --config "$main_file" --adapter caddyfile
+  systemctl enable --now caddy
+  systemctl reload caddy || systemctl restart caddy
+
+  if curl -fsS --connect-timeout 15 --max-time 30 "https://$domain/" -o /dev/null && curl -fsS --connect-timeout 15 --max-time 30 "https://$domain/api/status" -o /dev/null; then
+    echo "$(tr https_ready): https://$domain"
+  else
+    echo "HTTPS verification is pending. Check DNS propagation, ports 80/443, and: journalctl -u caddy -n 100 --no-pager" >&2
+    return 1
+  fi
+}
+
 install_controller() {
   echo "$(tr install_controller)"
   install_prerequisites
@@ -151,24 +210,7 @@ install_controller() {
   echo "$(tr controller_help)"
   echo
   echo "$(tr service_active): $(systemctl is-active vps-probe.service)"
-
-  echo "$(tr caddy_note)"
-  if confirm caddy_question; then
-    local domain caddy_snippet
-    domain=$(ask "$(tr caddy_domain)" "probe.example.com")
-    caddy_snippet=$(cat <<EOF
-$domain {
-    encode gzip zstd
-    @websocket path /ws
-    reverse_proxy @websocket 127.0.0.1:8089
-    reverse_proxy 127.0.0.1:8088
-}
-EOF
-)
-    echo "$caddy_snippet"
-    echo "Save this block to your existing /etc/caddy/Caddyfile, then run:"
-    echo "caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile && systemctl reload caddy"
-  fi
+  configure_https
 }
 
 install_agent() {
