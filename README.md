@@ -2,7 +2,7 @@
 
 A lightweight VPS status monitoring panel.
 
-The controller hosts a web dashboard. Each monitored VPS runs a small push agent that reports its status to the controller over HTTPS every 30 seconds.
+The controller hosts a web dashboard. Each monitored VPS runs a small WebSocket agent that reports its status to the controller over WSS every five seconds.
 
 ## One-line Install
 

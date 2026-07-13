@@ -6,7 +6,7 @@ CONTROLLER_SERVICE="/etc/systemd/system/vps-probe.service"
 AGENT_SCRIPT="/usr/local/sbin/vps-probe-agent.py"
 AGENT_CONFIG="/etc/vps-probe-agent.json"
 AGENT_SERVICE="/etc/systemd/system/vps-probe-agent.service"
-AGENT_TIMER="/etc/systemd/system/vps-probe-agent.timer"
+HUB_SERVICE="/etc/systemd/system/vps-probe-hub.service"
 REPO_RAW="https://raw.githubusercontent.com/am-tmac/vps-probe/main"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 LANG=""
@@ -37,7 +37,7 @@ tr() {
       token) echo "此被控端的 Bearer Token";;
       node_id) echo "节点 ID（仅用于显示提示，不会发送）";;
       public_panel) echo "面板地址";;
-      agent_ready) echo "被控端探针已安装，30 秒后会首次上报。";;
+      agent_ready) echo "被控端探针已安装并保持 WSS 长连接。";;
       controller_ready) echo "主控端已安装。请编辑配置添加被控端 Token。";;
       caddy_question) echo "配置 Caddy HTTPS 反代？";;
       caddy_domain) echo "面板域名";;
@@ -71,7 +71,7 @@ tr() {
       token) echo "This agent's Bearer token";;
       node_id) echo "Node ID (display hint only; not transmitted)";;
       public_panel) echo "Panel URL";;
-      agent_ready) echo "Agent installed. It will submit its first report within 30 seconds.";;
+      agent_ready) echo "Agent installed and keeping a persistent WSS connection.";;
       controller_ready) echo "Controller installed. Edit its config to add agent tokens.";;
       caddy_question) echo "Configure a Caddy HTTPS reverse proxy?";;
       caddy_domain) echo "Panel domain";;
@@ -118,7 +118,7 @@ source_file() {
 
 install_prerequisites() {
   apt-get update
-  DEBIAN_FRONTEND=noninteractive apt-get install -y python3 curl ca-certificates
+  DEBIAN_FRONTEND=noninteractive apt-get install -y python3 python3-websockets curl ca-certificates
 }
 
 generate_token() {
@@ -134,7 +134,9 @@ install_controller() {
   install_prerequisites
   install -d -m 0755 "$APP_DIR"
   source_file "panel.py" "$APP_DIR/panel.py" 0700
+  source_file "ws_hub.py" "$APP_DIR/ws_hub.py" 0700
   source_file "systemd/vps-probe.service" "$CONTROLLER_SERVICE" 0644
+  source_file "systemd/vps-probe-hub.service" "/etc/systemd/system/vps-probe-hub.service" 0644
 
   if [ ! -f "$APP_DIR/config.json" ]; then
     source_file "config.example.json" "$APP_DIR/config.json" 0600
@@ -143,7 +145,7 @@ install_controller() {
   fi
 
   systemctl daemon-reload
-  systemctl enable --now vps-probe.service
+  systemctl enable --now vps-probe.service vps-probe-hub.service
   echo "$(tr controller_ready)"
   echo "$(tr config_path): $APP_DIR/config.json"
   echo "$(tr controller_help)"
@@ -157,6 +159,8 @@ install_controller() {
     caddy_snippet=$(cat <<EOF
 $domain {
     encode gzip zstd
+    @websocket path /ws
+    reverse_proxy @websocket 127.0.0.1:8089
     reverse_proxy 127.0.0.1:8088
 }
 EOF
@@ -178,7 +182,7 @@ install_agent() {
 
   source_file "agent/vps-probe-agent.py" "$AGENT_SCRIPT" 0700
   source_file "systemd/vps-probe-agent.service" "$AGENT_SERVICE" 0644
-  source_file "systemd/vps-probe-agent.timer" "$AGENT_TIMER" 0644
+  rm -f /etc/systemd/system/vps-probe-agent.timer
 
   cat > "$AGENT_CONFIG" <<EOF
 {
@@ -189,13 +193,13 @@ EOF
   chmod 600 "$AGENT_CONFIG"
 
   systemctl daemon-reload
-  systemctl enable --now vps-probe-agent.timer
-  systemctl start vps-probe-agent.service || true
+  systemctl disable --now vps-probe-agent.timer 2>/dev/null || true
+  systemctl enable --now vps-probe-agent.service
 
   echo "$(tr agent_ready)"
   echo "$(tr agent_help)"
   echo "Node ID: $node_id"
-  echo "$(tr service_active): $(systemctl is-active vps-probe-agent.timer)"
+  echo "$(tr service_active): $(systemctl is-active vps-probe-agent.service)"
   systemctl status vps-probe-agent.service --no-pager | sed -n '1,10p' || true
 }
 
@@ -205,10 +209,10 @@ uninstall_probe() {
     return
   fi
   echo "$(tr uninstalling)"
-  systemctl disable --now vps-probe.service 2>/dev/null || true
+  systemctl disable --now vps-probe.service vps-probe-hub.service 2>/dev/null || true
   systemctl disable --now vps-probe-agent.timer 2>/dev/null || true
   systemctl stop vps-probe-agent.service 2>/dev/null || true
-  rm -f "$CONTROLLER_SERVICE" "$AGENT_SERVICE" "$AGENT_TIMER" "$AGENT_SCRIPT" "$AGENT_CONFIG"
+  rm -f "$CONTROLLER_SERVICE" "$HUB_SERVICE" "$AGENT_SERVICE" /etc/systemd/system/vps-probe-agent.timer "$AGENT_SCRIPT" "$AGENT_CONFIG"
   rm -rf "$APP_DIR"
   systemctl daemon-reload
   echo "$(tr removed)"
