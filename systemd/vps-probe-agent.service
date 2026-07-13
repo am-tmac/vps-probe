@@ -1,5 +1,5 @@
 [Unit]
-Description=VPS Probe WebSocket Agent
+Description=Jager Monitor WebSocket Agent
 After=network-online.target
 Wants=network-online.target
 

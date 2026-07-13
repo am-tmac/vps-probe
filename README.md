@@ -1,4 +1,4 @@
-# VPS Probe
+# Jager Monitor
 
 A lightweight VPS status monitoring panel.
 

@@ -1,5 +1,5 @@
 [Unit]
-Description=VPS Probe WebSocket Hub
+Description=Jager Monitor WebSocket Hub
 After=network-online.target vps-probe.service
 Wants=network-online.target
 

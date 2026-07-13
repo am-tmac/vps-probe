@@ -1,5 +1,5 @@
 [Unit]
-Description=Tmac VPS Probe Panel
+Description=Jager Monitor Panel
 After=network-online.target
 Wants=network-online.target
 
