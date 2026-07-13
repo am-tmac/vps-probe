@@ -2,60 +2,250 @@
 set -euo pipefail
 
 APP_DIR="/opt/vps-probe"
-SERVICE_FILE="/etc/systemd/system/vps-probe.service"
+CONTROLLER_SERVICE="/etc/systemd/system/vps-probe.service"
+AGENT_SCRIPT="/usr/local/sbin/vps-probe-agent.py"
+AGENT_CONFIG="/etc/vps-probe-agent.json"
+AGENT_SERVICE="/etc/systemd/system/vps-probe-agent.service"
+AGENT_TIMER="/etc/systemd/system/vps-probe-agent.timer"
 REPO_RAW="https://raw.githubusercontent.com/am-tmac/vps-probe/main"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+LANG=""
 
 need_root() {
   if [ "${EUID:-$(id -u)}" -ne 0 ]; then
-    echo "Please run as root: sudo bash install.sh" >&2
+    echo "Please run as root / 请使用 root 运行" >&2
     exit 1
   fi
 }
 
-install_packages() {
+tr() {
+  if [ "$LANG" = "zh" ]; then
+    case "$1" in
+      choose_language) echo "选择语言";;
+      chinese) echo "中文";;
+      english) echo "English";;
+      invalid_choice) echo "无效选项，请重试。";;
+      choose_action) echo "选择操作";;
+      controller) echo "安装/更新主控端";;
+      agent) echo "安装/更新被控端探针";;
+      uninstall) echo "卸载";;
+      exit) echo "退出";;
+      install_controller) echo "正在安装主控端...";;
+      install_agent) echo "正在安装被控端探针...";;
+      uninstalling) echo "正在卸载 VPS Probe...";;
+      endpoint) echo "主控端上报地址";;
+      token) echo "此被控端的 Bearer Token";;
+      node_id) echo "节点 ID（仅用于显示提示，不会发送）";;
+      public_panel) echo "面板地址";;
+      agent_ready) echo "被控端探针已安装，30 秒后会首次上报。";;
+      controller_ready) echo "主控端已安装。请编辑配置添加被控端 Token。";;
+      caddy_question) echo "配置 Caddy HTTPS 反代？";;
+      caddy_domain) echo "面板域名";;
+      caddy_note) echo "不会自动安装 Caddy，也不会覆盖现有 Caddyfile。";;
+      config_path) echo "主控端配置文件";;
+      removed) echo "已移除 VPS Probe 文件和 systemd 服务。未卸载 Python 或 Caddy。";;
+      confirm_uninstall) echo "确认卸载？此操作会删除本组件配置与缓存";;
+      yes_no) echo "[y/N]";;
+      cancelled) echo "已取消。";;
+      fetch_failed) echo "无法下载所需文件。请检查网络或从仓库目录运行。";;
+      controller_help) echo "为每个被控端创建唯一 Token，并在 nodes 中添加 type=agent 的节点。";;
+      agent_help) echo "Token 必须与主控端 config.json 中相应 agent 节点的 token 完全一致。";;
+      service_active) echo "服务状态";;
+      *) echo "$1";;
+    esac
+  else
+    case "$1" in
+      choose_language) echo "Choose language";;
+      chinese) echo "Chinese";;
+      english) echo "English";;
+      invalid_choice) echo "Invalid choice. Please try again.";;
+      choose_action) echo "Choose an action";;
+      controller) echo "Install/update controller";;
+      agent) echo "Install/update agent";;
+      uninstall) echo "Uninstall";;
+      exit) echo "Exit";;
+      install_controller) echo "Installing controller...";;
+      install_agent) echo "Installing agent...";;
+      uninstalling) echo "Uninstalling VPS Probe...";;
+      endpoint) echo "Controller report endpoint";;
+      token) echo "This agent's Bearer token";;
+      node_id) echo "Node ID (display hint only; not transmitted)";;
+      public_panel) echo "Panel URL";;
+      agent_ready) echo "Agent installed. It will submit its first report within 30 seconds.";;
+      controller_ready) echo "Controller installed. Edit its config to add agent tokens.";;
+      caddy_question) echo "Configure a Caddy HTTPS reverse proxy?";;
+      caddy_domain) echo "Panel domain";;
+      caddy_note) echo "Caddy will not be installed and the existing Caddyfile will not be overwritten automatically.";;
+      config_path) echo "Controller config";;
+      removed) echo "Removed VPS Probe files and systemd units. Python and Caddy were not removed.";;
+      confirm_uninstall) echo "Confirm uninstall? This deletes this component's config and state";;
+      yes_no) echo "[y/N]";;
+      cancelled) echo "Cancelled.";;
+      fetch_failed) echo "Could not fetch required files. Check network access or run from the repository directory.";;
+      controller_help) echo "Generate a unique token for each agent and add a type=agent node to nodes.";;
+      agent_help) echo "The token must exactly match the corresponding agent node token in the controller config.json.";;
+      service_active) echo "Service status";;
+      *) echo "$1";;
+    esac
+  fi
+}
+
+ask() {
+  local label="$1" default="$2" value
+  read -r -p "$label [$default]: " value || true
+  printf '%s' "${value:-$default}"
+}
+
+confirm() {
+  local answer
+  read -r -p "$(tr "$1") $(tr yes_no) " answer || true
+  [[ "$answer" =~ ^[Yy]([Ee][Ss])?$ ]]
+}
+
+source_file() {
+  local relative="$1" destination="$2" mode="$3"
+  if [ -f "$SCRIPT_DIR/$relative" ]; then
+    install -m "$mode" "$SCRIPT_DIR/$relative" "$destination"
+  else
+    if ! curl -fsSL "$REPO_RAW/$relative" -o "$destination"; then
+      rm -f "$destination"
+      echo "$(tr fetch_failed)" >&2
+      exit 1
+    fi
+    chmod "$mode" "$destination"
+  fi
+}
+
+install_prerequisites() {
   apt-get update
-  apt-get install -y python3 curl
+  DEBIAN_FRONTEND=noninteractive apt-get install -y python3 curl ca-certificates
 }
 
-install_files() {
+generate_token() {
+  if command -v openssl >/dev/null 2>&1; then
+    openssl rand -hex 24
+  else
+    python3 -c 'import secrets; print(secrets.token_hex(24))'
+  fi
+}
+
+install_controller() {
+  echo "$(tr install_controller)"
+  install_prerequisites
   install -d -m 0755 "$APP_DIR"
-  if [ -f ./panel.py ] && [ -f ./config.example.json ]; then
-    install -m 0700 ./panel.py "$APP_DIR/panel.py"
-    if [ ! -f "$APP_DIR/config.json" ]; then
-      install -m 0600 ./config.example.json "$APP_DIR/config.json"
-    fi
-  else
-    curl -fsSL "$REPO_RAW/panel.py" -o "$APP_DIR/panel.py"
-    chmod 700 "$APP_DIR/panel.py"
-    if [ ! -f "$APP_DIR/config.json" ]; then
-      curl -fsSL "$REPO_RAW/config.example.json" -o "$APP_DIR/config.json"
-      chmod 600 "$APP_DIR/config.json"
-    fi
-  fi
-  chmod 700 "$APP_DIR/panel.py"
-  chmod 600 "$APP_DIR/config.json"
-}
+  source_file "panel.py" "$APP_DIR/panel.py" 0700
+  source_file "systemd/vps-probe.service" "$CONTROLLER_SERVICE" 0644
 
-install_service() {
-  if [ -f ./systemd/vps-probe.service ]; then
-    install -m 0644 ./systemd/vps-probe.service "$SERVICE_FILE"
+  if [ ! -f "$APP_DIR/config.json" ]; then
+    source_file "config.example.json" "$APP_DIR/config.json" 0600
   else
-    curl -fsSL "$REPO_RAW/systemd/vps-probe.service" -o "$SERVICE_FILE"
+    chmod 600 "$APP_DIR/config.json"
   fi
+
   systemctl daemon-reload
   systemctl enable --now vps-probe.service
-}
-
-main() {
-  need_root
-  install_packages
-  install_files
-  install_service
-  systemctl status vps-probe.service --no-pager | sed -n '1,12p'
+  echo "$(tr controller_ready)"
+  echo "$(tr config_path): $APP_DIR/config.json"
+  echo "$(tr controller_help)"
   echo
-  echo "Controller installed. Configure agent nodes in: $APP_DIR/config.json"
-  echo "Do not add remote SSH passwords or SSH node definitions."
-  echo "Restart after config edits: systemctl restart vps-probe.service"
+  echo "$(tr service_active): $(systemctl is-active vps-probe.service)"
+
+  echo "$(tr caddy_note)"
+  if confirm caddy_question; then
+    local domain caddy_snippet
+    domain=$(ask "$(tr caddy_domain)" "probe.example.com")
+    caddy_snippet=$(cat <<EOF
+$domain {
+    encode gzip zstd
+    reverse_proxy 127.0.0.1:8088
+}
+EOF
+)
+    echo "$caddy_snippet"
+    echo "Save this block to your existing /etc/caddy/Caddyfile, then run:"
+    echo "caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile && systemctl reload caddy"
+  fi
 }
 
-main "$@"
+install_agent() {
+  echo "$(tr install_agent)"
+  install_prerequisites
+
+  local endpoint token node_id
+  endpoint=$(ask "$(tr endpoint)" "https://probe.example.com/api/report")
+  node_id=$(ask "$(tr node_id)" "remote-node")
+  token=$(ask "$(tr token)" "$(generate_token)")
+
+  source_file "agent/vps-probe-agent.py" "$AGENT_SCRIPT" 0700
+  source_file "systemd/vps-probe-agent.service" "$AGENT_SERVICE" 0644
+  source_file "systemd/vps-probe-agent.timer" "$AGENT_TIMER" 0644
+
+  cat > "$AGENT_CONFIG" <<EOF
+{
+  "endpoint": "$endpoint",
+  "token": "$token"
+}
+EOF
+  chmod 600 "$AGENT_CONFIG"
+
+  systemctl daemon-reload
+  systemctl enable --now vps-probe-agent.timer
+  systemctl start vps-probe-agent.service || true
+
+  echo "$(tr agent_ready)"
+  echo "$(tr agent_help)"
+  echo "Node ID: $node_id"
+  echo "$(tr service_active): $(systemctl is-active vps-probe-agent.timer)"
+  systemctl status vps-probe-agent.service --no-pager | sed -n '1,10p' || true
+}
+
+uninstall_probe() {
+  if ! confirm confirm_uninstall; then
+    echo "$(tr cancelled)"
+    return
+  fi
+  echo "$(tr uninstalling)"
+  systemctl disable --now vps-probe.service 2>/dev/null || true
+  systemctl disable --now vps-probe-agent.timer 2>/dev/null || true
+  systemctl stop vps-probe-agent.service 2>/dev/null || true
+  rm -f "$CONTROLLER_SERVICE" "$AGENT_SERVICE" "$AGENT_TIMER" "$AGENT_SCRIPT" "$AGENT_CONFIG"
+  rm -rf "$APP_DIR"
+  systemctl daemon-reload
+  echo "$(tr removed)"
+}
+
+choose_language() {
+  while :; do
+    echo "1) 中文"
+    echo "2) English"
+    read -r -p "Choose language / 选择语言 [1]: " choice || true
+    case "${choice:-1}" in
+      1) LANG="zh"; return ;;
+      2) LANG="en"; return ;;
+      *) echo "Invalid choice / 无效选项" ;;
+    esac
+  done
+}
+
+main_menu() {
+  while :; do
+    echo
+    echo "$(tr choose_action)"
+    echo "1) $(tr controller)"
+    echo "2) $(tr agent)"
+    echo "3) $(tr uninstall)"
+    echo "0) $(tr exit)"
+    read -r -p "> " choice || true
+    case "$choice" in
+      1) install_controller; return ;;
+      2) install_agent; return ;;
+      3) uninstall_probe; return ;;
+      0) return ;;
+      *) echo "$(tr invalid_choice)" ;;
+    esac
+  done
+}
+
+need_root
+choose_language
+main_menu

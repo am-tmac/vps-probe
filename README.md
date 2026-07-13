@@ -34,6 +34,22 @@ agent node -- HTTPS POST /api/report --> controller --> browser status panel
 - Reports older than 120 seconds are displayed offline.
 - Do not commit real tokens, controller credentials, node addresses, or `state.json`.
 
+## One-line installer
+
+Run as `root` on Ubuntu/Debian:
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/am-tmac/vps-probe/main/install.sh)
+```
+
+The installer first asks for Chinese or English, then offers:
+
+1. Install/update controller
+2. Install/update push agent
+3. Uninstall VPS Probe
+
+It does not install `sshpass` and never configures SSH polling.
+
 ## Controller setup
 
 Install on the public controller host:
