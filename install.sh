@@ -4,6 +4,7 @@ set -euo pipefail
 APP_DIR="/opt/vps-probe"
 CONTROLLER_SERVICE="/etc/systemd/system/vps-probe.service"
 AGENT_SCRIPT="/usr/local/sbin/vps-probe-agent.py"
+AGENT_VENV="/opt/vps-probe-agent-venv"
 AGENT_CONFIG="/etc/vps-probe-agent.json"
 AGENT_SERVICE="/etc/systemd/system/vps-probe-agent.service"
 HUB_SERVICE="/etc/systemd/system/vps-probe-hub.service"
@@ -126,7 +127,7 @@ source_file() {
 
 install_prerequisites() {
   apt-get update
-  DEBIAN_FRONTEND=noninteractive apt-get install -y python3 python3-websockets curl ca-certificates
+  DEBIAN_FRONTEND=noninteractive apt-get install -y python3 python3-venv python3-websockets curl ca-certificates
 }
 
 generate_token() {
@@ -259,6 +260,10 @@ install_agent() {
 
   source_file "agent/vps-probe-agent.py" "$AGENT_SCRIPT" 0700
   source_file "systemd/vps-probe-agent.service" "$AGENT_SERVICE" 0644
+  rm -rf "$AGENT_VENV"
+  python3 -m venv "$AGENT_VENV"
+  "$AGENT_VENV/bin/pip" install --no-cache-dir "websockets==10.4"
+  sed -i 's|^ExecStart=/usr/bin/python3 |ExecStart=/opt/vps-probe-agent-venv/bin/python |' "$AGENT_SERVICE"
   rm -f /etc/systemd/system/vps-probe-agent.timer
 
   cat > "$AGENT_CONFIG" <<EOF
@@ -290,6 +295,7 @@ uninstall_probe() {
   systemctl disable --now vps-probe-agent.timer 2>/dev/null || true
   systemctl stop vps-probe-agent.service 2>/dev/null || true
   rm -f "$CONTROLLER_SERVICE" "$HUB_SERVICE" "$AGENT_SERVICE" /etc/systemd/system/vps-probe-agent.timer "$AGENT_SCRIPT" "$AGENT_CONFIG"
+  rm -rf "$AGENT_VENV"
   rm -f /etc/caddy/jager-monitor.caddy /etc/caddy/jager-monitor-panel.caddy /etc/caddy/jager-monitor-agent.caddy
   if [ -f /etc/caddy/Caddyfile ] && grep -Fqx 'import /etc/caddy/*.caddy' /etc/caddy/Caddyfile; then
     sed -i '\|^import /etc/caddy/\\\*\\.caddy$|d' /etc/caddy/Caddyfile
