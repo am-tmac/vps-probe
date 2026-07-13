@@ -1,4 +1,7 @@
 probe.example.com {
     encode gzip zstd
+
+    @websocket path /ws
+    reverse_proxy @websocket 127.0.0.1:8089
     reverse_proxy 127.0.0.1:8088
 }

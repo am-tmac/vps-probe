@@ -14,6 +14,7 @@ WS_PORT = 8089
 MAX_REPORT_BYTES = 16384
 
 clients = set()
+state_lock = asyncio.Lock()
 
 
 def load_config():
@@ -79,9 +80,10 @@ async def handler(websocket):
             allowed = {'hostname', 'uptime_sec', 'load', 'load1', 'cpu_count', 'cpu_usage_percent', 'mem_total_mb', 'mem_used_mb', 'swap_total_mb', 'swap_used_mb', 'disk_total_mb', 'disk_used_mb', 'disk_avail_mb', 'disk_percent', 'net_rx_bytes', 'net_tx_bytes', 'rx_speed_bps', 'tx_speed_bps', 'tcp_count', 'udp_count', 'process_count', 'os', 'kernel', 'arch', 'ts'}
             clean = {key: report['data'][key] for key in allowed if key in report['data']}
             clean['reported_at'] = int(time.time())
-            state = load_state()
-            state[node['id']] = clean
-            save_state(state)
+            async with state_lock:
+                state = load_state()
+                state[node['id']] = clean
+                save_state(state)
             await notify_browsers()
     except (json.JSONDecodeError, asyncio.TimeoutError):
         await websocket.close(code=1008, reason='invalid request')

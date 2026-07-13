@@ -138,7 +138,7 @@ async def run_agent():
                     await ws.send(json.dumps({'type': 'report', 'data': collect()}, separators=(',', ':')))
                     await asyncio.sleep(interval)
         except Exception as exc:
-            print(f'VPS Probe reconnecting in {RECONNECT_DELAY}s: {exc}', flush=True)
+            print(f'Jager Monitor reconnecting in {RECONNECT_DELAY}s: {exc}', flush=True)
             await asyncio.sleep(RECONNECT_DELAY)
 
 

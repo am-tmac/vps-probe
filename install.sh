@@ -7,7 +7,7 @@ AGENT_SCRIPT="/usr/local/sbin/vps-probe-agent.py"
 AGENT_CONFIG="/etc/vps-probe-agent.json"
 AGENT_SERVICE="/etc/systemd/system/vps-probe-agent.service"
 HUB_SERVICE="/etc/systemd/system/vps-probe-hub.service"
-REPO_RAW="https://raw.githubusercontent.com/am-tmac/vps-probe/main"
+REPO_RAW="https://raw.githubusercontent.com/am-tmac/jager-monitor/main"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 LANG=""
 
@@ -32,7 +32,7 @@ tr() {
       exit) echo "退出";;
       install_controller) echo "正在安装主控端...";;
       install_agent) echo "正在安装被控端探针...";;
-      uninstalling) echo "正在卸载 VPS Probe...";;
+      uninstalling) echo "正在卸载 Jager Monitor...";;
       endpoint) echo "主控端上报地址";;
       token) echo "此被控端的 Bearer Token";;
       node_id) echo "节点 ID（仅用于显示提示，不会发送）";;
@@ -43,7 +43,7 @@ tr() {
       caddy_domain) echo "面板域名";;
       caddy_note) echo "不会自动安装 Caddy，也不会覆盖现有 Caddyfile。";;
       config_path) echo "主控端配置文件";;
-      removed) echo "已移除 VPS Probe 文件和 systemd 服务。未卸载 Python 或 Caddy。";;
+      removed) echo "已移除 Jager Monitor 文件和 systemd 服务。未卸载 Python 或 Caddy。";;
       confirm_uninstall) echo "确认卸载？此操作会删除本组件配置与缓存";;
       yes_no) echo "[y/N]";;
       cancelled) echo "已取消。";;
@@ -66,7 +66,7 @@ tr() {
       exit) echo "Exit";;
       install_controller) echo "Installing controller...";;
       install_agent) echo "Installing agent...";;
-      uninstalling) echo "Uninstalling VPS Probe...";;
+      uninstalling) echo "Uninstalling Jager Monitor...";;
       endpoint) echo "Controller report endpoint";;
       token) echo "This agent's Bearer token";;
       node_id) echo "Node ID (display hint only; not transmitted)";;
@@ -77,7 +77,7 @@ tr() {
       caddy_domain) echo "Panel domain";;
       caddy_note) echo "Caddy will not be installed and the existing Caddyfile will not be overwritten automatically.";;
       config_path) echo "Controller config";;
-      removed) echo "Removed VPS Probe files and systemd units. Python and Caddy were not removed.";;
+      removed) echo "Removed Jager Monitor files and systemd units. Python and Caddy were not removed.";;
       confirm_uninstall) echo "Confirm uninstall? This deletes this component's config and state";;
       yes_no) echo "[y/N]";;
       cancelled) echo "Cancelled.";;
