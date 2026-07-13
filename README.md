@@ -9,5 +9,5 @@ The controller hosts a web dashboard. Each monitored VPS runs a small WebSocket 
 Run as root on either a controller or monitored VPS:
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/am-tmac/vps-probe/main/install.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/am-tmac/jager-monitor/main/install.sh)
 ```
