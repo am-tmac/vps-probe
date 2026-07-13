@@ -10,6 +10,8 @@ from pathlib import Path
 CONFIG_PATH = Path('/opt/vps-probe/config.json')
 STATE_PATH = Path('/opt/vps-probe/state.json')
 STALE_SECONDS = 120
+STATUS_CACHE_SECONDS = 2
+STATUS_CACHE = {'at': 0.0, 'nodes': None}
 COLLECT_SH = r'''set -e
 j(){ printf '%s' "$1"|sed 's/\\/\\\\/g;s/"/\\"/g'; }
 h=$(hostname); u=$(awk '{print int($1)}' /proc/uptime); l=$(cut -d' ' -f1-3 /proc/loadavg); c=$(nproc)
@@ -32,7 +34,11 @@ def local():
     if p.returncode: raise RuntimeError((p.stderr or p.stdout)[-300:])
     return json.loads(p.stdout.strip().splitlines()[-1])
 def nodes():
-    now=int(time.time()); saved=state(); out=[]
+    now = time.time()
+    if STATUS_CACHE['nodes'] is not None and now - STATUS_CACHE['at'] < STATUS_CACHE_SECONDS:
+        return STATUS_CACHE['nodes']
+    now = int(now)
+    saved=state(); out=[]
     for n in config().get('nodes',[]):
         r={'name':n['name'],'type':n['type'],'flag':n.get('flag',''),'region':n.get('region',''),'online':False}
         try:
@@ -44,6 +50,8 @@ def nodes():
                 else:r.update(x);r['online']=True
         except Exception as e:r['error']=str(e)
         r.pop('hostname',None);out.append(r)
+    STATUS_CACHE['at'] = time.time()
+    STATUS_CACHE['nodes'] = out
     return out
 class Handler(BaseHTTPRequestHandler):
     server_version='JagerMonitor/1.0'
@@ -55,12 +63,7 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path.startswith('/api/status'):self.send(200,json.dumps({'nodes':nodes(),'ts':int(time.time())},ensure_ascii=False).encode())
         else:self.send(404,b'not found','text/plain')
     def do_POST(self):
-        if self.path!='/api/report':self.send(404,b'not found','text/plain');return
-        tok=self.headers.get('Authorization','').removeprefix('Bearer ');n=next((x for x in config().get('nodes',[]) if x.get('type')=='agent' and hmac.compare_digest(x.get('token',''),tok)),None)
-        if not n:self.send(401,b'unauthorized','text/plain');return
-        try:
-            z=json.loads(self.rfile.read(int(self.headers.get('Content-Length','0'))));allowed={'hostname','uptime_sec','load','load1','cpu_count','cpu_usage_percent','mem_total_mb','mem_used_mb','swap_total_mb','swap_used_mb','disk_total_mb','disk_used_mb','disk_avail_mb','disk_percent','net_rx_bytes','net_tx_bytes','rx_speed_bps','tx_speed_bps','tcp_count','udp_count','process_count','os','kernel','arch','ts'};x={k:z[k] for k in allowed if k in z};x['reported_at']=int(time.time());s=state();s[n['id']]=x;tmp=STATE_PATH.with_suffix('.tmp');tmp.write_text(json.dumps(s,ensure_ascii=False));tmp.chmod(0o600);tmp.replace(STATE_PATH);self.send(204,b'','text/plain')
-        except Exception:self.send(400,b'invalid report','text/plain')
+        self.send(404,b'not found','text/plain')
 def main():
     c=config();ThreadingHTTPServer((c.get('listen','127.0.0.1'),int(c.get('port',8088))),Handler).serve_forever()
 if __name__=='__main__':main()

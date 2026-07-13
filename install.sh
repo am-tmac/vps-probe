@@ -238,7 +238,7 @@ install_agent() {
   install_prerequisites
 
   local endpoint token node_id
-  endpoint=$(ask "$(tr endpoint)" "https://probe.example.com/api/report")
+  endpoint=$(ask "$(tr endpoint)" "wss://probe.example.com/ws")
   node_id=$(ask "$(tr node_id)" "remote-node")
   token=$(ask "$(tr token)" "$(generate_token)")
 
@@ -275,6 +275,11 @@ uninstall_probe() {
   systemctl disable --now vps-probe-agent.timer 2>/dev/null || true
   systemctl stop vps-probe-agent.service 2>/dev/null || true
   rm -f "$CONTROLLER_SERVICE" "$HUB_SERVICE" "$AGENT_SERVICE" /etc/systemd/system/vps-probe-agent.timer "$AGENT_SCRIPT" "$AGENT_CONFIG"
+  rm -f /etc/caddy/jager-monitor.caddy
+  if [ -f /etc/caddy/Caddyfile ] && grep -Fqx 'import /etc/caddy/*.caddy' /etc/caddy/Caddyfile; then
+    sed -i '\|^import /etc/caddy/\\\*\\.caddy$|d' /etc/caddy/Caddyfile
+    caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null 2>&1 && systemctl reload caddy || true
+  fi
   rm -rf "$APP_DIR"
   systemctl daemon-reload
   echo "$(tr removed)"
