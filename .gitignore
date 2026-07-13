@@ -1,4 +1,6 @@
 __pycache__/
 *.pyc
 config.json
+state.json
 .env
+*.local.json

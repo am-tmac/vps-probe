@@ -1,0 +1,14 @@
+[Unit]
+Description=VPS Probe Push Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/usr/bin/python3 /usr/local/sbin/vps-probe-agent.py
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/etc/vps-probe-agent.json
