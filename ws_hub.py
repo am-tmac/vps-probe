@@ -89,6 +89,8 @@ async def handler(websocket):
                 state[node['id']] = clean
                 save_state(state)
             await notify_browsers()
+    except websockets.exceptions.ConnectionClosed:
+        pass
     except (json.JSONDecodeError, asyncio.TimeoutError):
         await websocket.close(code=1008, reason='invalid request')
     finally:
