@@ -40,11 +40,12 @@ tr() {
       agent_ready) echo "被控端探针已安装并保持 WSS 长连接。";;
       controller_ready) echo "主控端已安装。请编辑配置添加被控端 Token。";;
       caddy_question) echo "配置域名与自动 HTTPS 证书？";;
-      caddy_domain) echo "指向此主控端的域名";;
-      caddy_note) echo "脚本将安装 Caddy、创建独立站点配置，并自动申请 Let's Encrypt 证书。域名的 A/AAAA 记录必须已指向当前服务器，且 80/443 端口可访问。";;
-      dns_missing) echo "未检测到此域名的 DNS 记录，证书签发可能失败。请先确认 DNS 已解析到本机。";;
-      domain_exists) echo "此域名已经存在于 Caddy 配置中，脚本不会覆盖它。";;
-      https_ready) echo "HTTPS 与 WSS 验证成功。";;
+      caddy_domain) echo "面板域名（仅网页和 API）";;
+      agent_domain) echo "Agent WSS 域名（仅 /ws）";;
+      caddy_note) echo "脚本将安装 Caddy、创建独立站点配置，并自动申请 Let's Encrypt 证书。两个域名的 A/AAAA 记录必须已指向当前服务器，且 80/443 端口可访问。";;
+      dns_missing) echo "未检测到此域名的 DNS 记录。请先确认 DNS 已解析到本机。";;
+      domain_exists) echo "Jager Monitor 的 Caddy 站点配置已存在，脚本不会覆盖它。";;
+      https_ready) echo "面板 HTTPS 与 Agent WSS 验证成功。";;
       config_path) echo "主控端配置文件";;
       removed) echo "已移除 Jager Monitor 文件和 systemd 服务。未卸载 Python 或 Caddy。";;
       confirm_uninstall) echo "确认卸载？此操作会删除本组件配置与缓存";;
@@ -77,11 +78,12 @@ tr() {
       agent_ready) echo "Agent installed and keeping a persistent WSS connection.";;
       controller_ready) echo "Controller installed. Edit its config to add agent tokens.";;
       caddy_question) echo "Configure domain and automatic HTTPS certificate?";;
-      caddy_domain) echo "Domain pointing to this controller";;
-      caddy_note) echo "The script installs Caddy, creates an isolated site config, and automatically obtains a Let's Encrypt certificate. The domain A/AAAA record must already point to this server and ports 80/443 must be reachable.";;
-      dns_missing) echo "No DNS record was detected for this domain. Certificate issuance may fail; confirm DNS points to this server first.";;
-      domain_exists) echo "This domain already exists in the Caddy configuration. The script will not overwrite it.";;
-      https_ready) echo "HTTPS and WSS verification succeeded.";;
+      caddy_domain) echo "Panel domain (web and API only)";;
+      agent_domain) echo "Agent WSS domain (/ws only)";;
+      caddy_note) echo "The script installs Caddy, creates isolated site configs, and automatically obtains Let's Encrypt certificates. Both domain A/AAAA records must already point to this server and ports 80/443 must be reachable.";;
+      dns_missing) echo "No DNS record was detected for this domain. Confirm it points to this server first.";;
+      domain_exists) echo "A Jager Monitor Caddy site configuration already exists. The script will not overwrite it.";;
+      https_ready) echo "Panel HTTPS and Agent WSS verification succeeded.";;
       config_path) echo "Controller config";;
       removed) echo "Removed Jager Monitor files and systemd units. Python and Caddy were not removed.";;
       confirm_uninstall) echo "Confirm uninstall? This deletes this component's config and state";;
@@ -136,59 +138,71 @@ generate_token() {
 }
 
 configure_https() {
-  local domain site_file main_file main_backup site_backup had_site=0
+  local panel_domain agent_domain main_file panel_file agent_file main_backup agent_status
   echo "$(tr caddy_note)"
   if ! confirm caddy_question; then
     return
   fi
 
-  domain=$(ask "$(tr caddy_domain)" "probe.example.com")
-  if [[ ! "$domain" =~ ^[A-Za-z0-9.-]+$ ]] || [[ "$domain" != *.* ]]; then
-    echo "Invalid domain: $domain" >&2
-    return 1
-  fi
-  if ! getent ahosts "$domain" >/dev/null 2>&1; then
-    echo "$(tr dns_missing)" >&2
+  panel_domain=$(ask "$(tr caddy_domain)" "panel.example.com")
+  agent_domain=$(ask "$(tr agent_domain)" "agent.example.com")
+  for domain in "$panel_domain" "$agent_domain"; do
+    if [[ ! "$domain" =~ ^[A-Za-z0-9.-]+$ ]] || [[ "$domain" != *.* ]]; then
+      echo "Invalid domain: $domain" >&2
+      return 1
+    fi
+    if ! getent ahosts "$domain" >/dev/null 2>&1; then
+      echo "$(tr dns_missing): $domain" >&2
+      return 1
+    fi
+  done
+  if [ "$panel_domain" = "$agent_domain" ]; then
+    echo "Panel and Agent domains must be different." >&2
     return 1
   fi
 
   DEBIAN_FRONTEND=noninteractive apt-get install -y caddy
   main_file="/etc/caddy/Caddyfile"
-  site_file="/etc/caddy/jager-monitor.caddy"
-  main_backup=$(mktemp)
-  site_backup=$(mktemp)
+  panel_file="/etc/caddy/jager-monitor-panel.caddy"
+  agent_file="/etc/caddy/jager-monitor-agent.caddy"
   install -d -m 0755 /etc/caddy
   touch "$main_file"
-  cp -a "$main_file" "$main_backup"
-  if [ -e "$site_file" ]; then
-    cp -a "$site_file" "$site_backup"
-    had_site=1
+  if [ -e "$panel_file" ] || [ -e "$agent_file" ]; then
     echo "$(tr domain_exists)" >&2
-    rm -f "$main_backup" "$site_backup"
     return 1
   fi
-
+  main_backup=$(mktemp)
+  cp -a "$main_file" "$main_backup"
   rollback_https() {
     cp -a "$main_backup" "$main_file"
-    if [ "$had_site" -eq 1 ]; then cp -a "$site_backup" "$site_file"; else rm -f "$site_file"; fi
+    rm -f "$panel_file" "$agent_file" "$main_backup"
     caddy validate --config "$main_file" --adapter caddyfile >/dev/null 2>&1 && (systemctl reload caddy || true)
-    rm -f "$main_backup" "$site_backup"
   }
 
   if ! grep -Fqx 'import /etc/caddy/*.caddy' "$main_file"; then
     printf '\nimport /etc/caddy/*.caddy\n' >> "$main_file"
   fi
-  cat > "$site_file" <<EOF
-$domain {
+  cat > "$panel_file" <<EOF
+$panel_domain {
     encode gzip zstd
-    @websocket path /ws
-    reverse_proxy @websocket 127.0.0.1:8089
     reverse_proxy 127.0.0.1:8088
 }
 EOF
-  chmod 644 "$site_file"
+  cat > "$agent_file" <<EOF
+$agent_domain {
+    encode gzip zstd
+    handle /ws {
+        reverse_proxy 127.0.0.1:8089
+    }
+    handle {
+        respond "Not Found" 404
+    }
+}
+EOF
+  chmod 644 "$panel_file" "$agent_file"
   caddy fmt --overwrite "$main_file"
-  caddy fmt --overwrite "$site_file"
+  caddy fmt --overwrite "$panel_file"
+  caddy fmt --overwrite "$agent_file"
   if ! caddy validate --config "$main_file" --adapter caddyfile; then
     rollback_https
     return 1
@@ -198,9 +212,10 @@ EOF
     rollback_https
     return 1
   fi
-  if curl -fsS --connect-timeout 15 --max-time 30 "https://$domain/" -o /dev/null && curl -fsS --connect-timeout 15 --max-time 30 "https://$domain/api/status" -o /dev/null; then
-    rm -f "$main_backup" "$site_backup"
-    echo "$(tr https_ready): https://$domain"
+  agent_status=$(curl -sS --connect-timeout 15 --max-time 30 -o /dev/null -w '%{http_code}' "https://$agent_domain/")
+  if curl -fsS --connect-timeout 15 --max-time 30 "https://$panel_domain/api/status" -o /dev/null && [ "$agent_status" = "404" ]; then
+    rm -f "$main_backup"
+    echo "$(tr https_ready): https://$panel_domain and wss://$agent_domain/ws"
   else
     rollback_https
     echo "HTTPS verification failed; Caddy configuration was restored. Check DNS propagation, ports 80/443, and: journalctl -u caddy -n 100 --no-pager" >&2
@@ -238,7 +253,7 @@ install_agent() {
   install_prerequisites
 
   local endpoint token node_id
-  endpoint=$(ask "$(tr endpoint)" "wss://probe.example.com/ws")
+  endpoint=$(ask "$(tr endpoint)" "wss://agent.example.com/ws")
   node_id=$(ask "$(tr node_id)" "remote-node")
   token=$(ask "$(tr token)" "$(generate_token)")
 
@@ -275,7 +290,7 @@ uninstall_probe() {
   systemctl disable --now vps-probe-agent.timer 2>/dev/null || true
   systemctl stop vps-probe-agent.service 2>/dev/null || true
   rm -f "$CONTROLLER_SERVICE" "$HUB_SERVICE" "$AGENT_SERVICE" /etc/systemd/system/vps-probe-agent.timer "$AGENT_SCRIPT" "$AGENT_CONFIG"
-  rm -f /etc/caddy/jager-monitor.caddy
+  rm -f /etc/caddy/jager-monitor.caddy /etc/caddy/jager-monitor-panel.caddy /etc/caddy/jager-monitor-agent.caddy
   if [ -f /etc/caddy/Caddyfile ] && grep -Fqx 'import /etc/caddy/*.caddy' /etc/caddy/Caddyfile; then
     sed -i '\|^import /etc/caddy/\\\*\\.caddy$|d' /etc/caddy/Caddyfile
     caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null 2>&1 && systemctl reload caddy || true
