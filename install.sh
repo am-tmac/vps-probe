@@ -136,7 +136,7 @@ generate_token() {
 }
 
 configure_https() {
-  local domain caddy_file site_file main_file
+  local domain site_file main_file main_backup site_backup had_site=0
   echo "$(tr caddy_note)"
   if ! confirm caddy_question; then
     return
@@ -149,22 +149,35 @@ configure_https() {
   fi
   if ! getent ahosts "$domain" >/dev/null 2>&1; then
     echo "$(tr dns_missing)" >&2
+    return 1
   fi
 
   DEBIAN_FRONTEND=noninteractive apt-get install -y caddy
   main_file="/etc/caddy/Caddyfile"
   site_file="/etc/caddy/jager-monitor.caddy"
+  main_backup=$(mktemp)
+  site_backup=$(mktemp)
   install -d -m 0755 /etc/caddy
   touch "$main_file"
-
-  if grep -Fqx "$domain {" "$main_file" "$site_file" 2>/dev/null; then
+  cp -a "$main_file" "$main_backup"
+  if [ -e "$site_file" ]; then
+    cp -a "$site_file" "$site_backup"
+    had_site=1
     echo "$(tr domain_exists)" >&2
+    rm -f "$main_backup" "$site_backup"
     return 1
   fi
+
+  rollback_https() {
+    cp -a "$main_backup" "$main_file"
+    if [ "$had_site" -eq 1 ]; then cp -a "$site_backup" "$site_file"; else rm -f "$site_file"; fi
+    caddy validate --config "$main_file" --adapter caddyfile >/dev/null 2>&1 && (systemctl reload caddy || true)
+    rm -f "$main_backup" "$site_backup"
+  }
+
   if ! grep -Fqx 'import /etc/caddy/*.caddy' "$main_file"; then
     printf '\nimport /etc/caddy/*.caddy\n' >> "$main_file"
   fi
-
   cat > "$site_file" <<EOF
 $domain {
     encode gzip zstd
@@ -176,14 +189,21 @@ EOF
   chmod 644 "$site_file"
   caddy fmt --overwrite "$main_file"
   caddy fmt --overwrite "$site_file"
-  caddy validate --config "$main_file" --adapter caddyfile
+  if ! caddy validate --config "$main_file" --adapter caddyfile; then
+    rollback_https
+    return 1
+  fi
   systemctl enable --now caddy
-  systemctl reload caddy || systemctl restart caddy
-
+  if ! systemctl reload caddy && ! systemctl restart caddy; then
+    rollback_https
+    return 1
+  fi
   if curl -fsS --connect-timeout 15 --max-time 30 "https://$domain/" -o /dev/null && curl -fsS --connect-timeout 15 --max-time 30 "https://$domain/api/status" -o /dev/null; then
+    rm -f "$main_backup" "$site_backup"
     echo "$(tr https_ready): https://$domain"
   else
-    echo "HTTPS verification is pending. Check DNS propagation, ports 80/443, and: journalctl -u caddy -n 100 --no-pager" >&2
+    rollback_https
+    echo "HTTPS verification failed; Caddy configuration was restored. Check DNS propagation, ports 80/443, and: journalctl -u caddy -n 100 --no-pager" >&2
     return 1
   fi
 }

@@ -12,6 +12,7 @@ STATE_PATH = Path('/opt/vps-probe/state.json')
 WS_HOST = '127.0.0.1'
 WS_PORT = 8089
 MAX_REPORT_BYTES = 16384
+MAX_BROWSER_CLIENTS = 128
 
 clients = set()
 state_lock = asyncio.Lock()
@@ -62,6 +63,9 @@ async def handler(websocket):
         hello = json.loads(raw)
         role = hello.get('role')
         if role == 'browser':
+            if len(clients) >= MAX_BROWSER_CLIENTS:
+                await websocket.close(code=1013, reason='browser capacity reached')
+                return
             clients.add(websocket)
             await websocket.send(json.dumps({'type': 'connected', 'ts': int(time.time())}))
             await websocket.wait_closed()
