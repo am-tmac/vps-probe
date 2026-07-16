@@ -37,6 +37,7 @@ install_prerequisites() {{ :; }}
 configure_https() {{ :; }}
 backup_file() {{ local s="$1" d="$2" k="$3"; if [ -e "$s" ]; then cp -a "$s" "$d/$k"; : > "$d/$k.present"; fi; }}
 restore_file() {{ local dst="$1" d="$2" k="$3"; if [ -f "$d/$k.present" ]; then cp -a "$d/$k" "$dst"; else rm -f "$dst"; fi; }}
+remove_venv_link_or_dir() {{ if [ -L "$1" ]; then rm -f "$1"; else rm -rf "$1"; fi; }}
 source_file() {{ install -m "$3" "{ROOT}/$1" "$2"; }}
 ask() {{ echo new-endpoint; }}
 ask_secret() {{ echo new-token; }}

@@ -158,6 +158,15 @@ restore_file() {
   fi
 }
 
+remove_venv_link_or_dir() {
+  local path="$1"
+  if [ -L "$path" ]; then
+    rm -f "$path"
+  else
+    rm -rf "$path"
+  fi
+}
+
 install_prerequisites() {
   apt-get update
   DEBIAN_FRONTEND=noninteractive apt-get install -y python3 python3-venv python3-websockets curl ca-certificates
@@ -298,7 +307,7 @@ install_controller() {
     restore_file "$APP_DIR/validate_config.py" "$controller_backup" validate_config.py
     restore_file "$CONTROLLER_SERVICE" "$controller_backup" vps-probe.service
     restore_file "$HUB_SERVICE" "$controller_backup" vps-probe-hub.service
-    rm -rf "$CONTROLLER_VENV"
+    remove_venv_link_or_dir "$CONTROLLER_VENV"
     if [ -e "$old_venv" ] || [ -L "$old_venv" ]; then mv "$old_venv" "$CONTROLLER_VENV"; fi
     systemctl daemon-reload
     systemctl restart vps-probe.service vps-probe-hub.service || true
@@ -384,7 +393,7 @@ EOF
     restore_file "$AGENT_SCRIPT" "$agent_backup" vps-probe-agent.py
     restore_file "$AGENT_SERVICE" "$agent_backup" vps-probe-agent.service
     restore_file "$AGENT_CONFIG" "$agent_backup" config.json
-    rm -rf "$AGENT_VENV"
+    remove_venv_link_or_dir "$AGENT_VENV"
     if [ -e "$old_venv" ] || [ -L "$old_venv" ]; then mv "$old_venv" "$AGENT_VENV"; fi
     systemctl daemon-reload
     systemctl restart vps-probe-agent.service || true
@@ -430,7 +439,9 @@ uninstall_probe() {
   systemctl disable --now vps-probe-agent.timer 2>/dev/null || true
   systemctl stop vps-probe-agent.service 2>/dev/null || true
   rm -f "$CONTROLLER_SERVICE" "$HUB_SERVICE" "$AGENT_SERVICE" /etc/systemd/system/vps-probe-agent.timer "$AGENT_SCRIPT" "$AGENT_CONFIG"
-  rm -rf "$AGENT_VENV" "$AGENT_VENV".release.* "$CONTROLLER_VENV" "$CONTROLLER_VENV".release.*
+  remove_venv_link_or_dir "$AGENT_VENV"
+  remove_venv_link_or_dir "$CONTROLLER_VENV"
+  rm -rf "$AGENT_VENV".release.* "$CONTROLLER_VENV".release.*
   rm -f /etc/caddy/jager-monitor.caddy /etc/caddy/jager-monitor-panel.caddy /etc/caddy/jager-monitor-agent.caddy
   if [ -f /etc/caddy/Caddyfile ] && grep -Fqx 'import /etc/caddy/*.caddy' /etc/caddy/Caddyfile; then
     sed -i '\|^import /etc/caddy/\\\*\\.caddy$|d' /etc/caddy/Caddyfile
