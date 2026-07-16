@@ -37,6 +37,8 @@ def test_config_rejects_empty_and_duplicate_agent_tokens(tmp_path):
 
 def test_report_validation_rejects_nonfinite_wrong_type_and_out_of_range():
     hub = load_module('hub_report', 'ws_hub.py')
+    with pytest.raises(ValueError, match='missing required'):
+        hub.clean_report({})
     with pytest.raises(ValueError):
         hub.clean_report({'cpu_usage_percent': float('inf')})
     with pytest.raises(ValueError):
@@ -47,16 +49,26 @@ def test_report_validation_rejects_nonfinite_wrong_type_and_out_of_range():
         hub.clean_report({'os': 'x' * 300})
 
     clean = hub.clean_report({
+        'uptime_sec': 1,
         'cpu_usage_percent': 12.5,
         'mem_total_mb': 1024,
         'mem_used_mb': 512,
+        'disk_percent': 10,
+        'net_rx_bytes': 1,
+        'net_tx_bytes': 2,
+        'ts': 1,
         'os': 'Linux',
         'ignored': 'value',
     })
     assert clean == {
+        'uptime_sec': 1,
         'cpu_usage_percent': 12.5,
         'mem_total_mb': 1024,
         'mem_used_mb': 512,
+        'disk_percent': 10,
+        'net_rx_bytes': 1,
+        'net_tx_bytes': 2,
+        'ts': 1,
         'os': 'Linux',
     }
     json.dumps(clean, allow_nan=False)
@@ -170,6 +182,29 @@ def test_installer_has_atomic_download_restart_and_controller_venv():
     assert 'umask 077' in text
     assert 'read -r -s' in text
     assert 'validate_config.py' in text
+    assert 'controller_stage' in text
+    assert 'controller_backup' in text
+    assert 'rollback_controller' in text
+    assert 'agent_stage' in text
+    assert 'agent_backup' in text
+    assert 'rollback_agent' in text
+    assert 'preserve_agent_config' in text
+
+
+def test_installer_validates_before_controller_replacement():
+    text = (ROOT / 'install.sh').read_text()
+    function = text[text.index('install_controller()'):text.index('install_agent()')]
+    validate_at = function.index('validate_config.py')
+    replace_at = function.index('install -m 0700 "$controller_stage/panel.py"')
+    assert validate_at < replace_at
+
+
+def test_installer_preserves_existing_agent_credentials():
+    text = (ROOT / 'install.sh').read_text()
+    function = text[text.index('install_agent()'):text.index('uninstall_probe()')]
+    assert 'if [ -f "$AGENT_CONFIG" ]' in function
+    assert 'preserve_agent_config' in function
+    assert 'cp -a "$AGENT_CONFIG" "$agent_stage/config.json"' in function
 
 
 def test_caddy_keeps_panel_http_and_agent_websocket_separate():

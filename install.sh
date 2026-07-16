@@ -141,6 +141,32 @@ source_file() {
   mv -f "$temp" "$destination"
 }
 
+backup_file() {
+  local source="$1" backup_dir="$2" key="$3"
+  if [ -e "$source" ]; then
+    cp -a "$source" "$backup_dir/$key"
+    : > "$backup_dir/$key.present"
+  fi
+}
+
+restore_file() {
+  local destination="$1" backup_dir="$2" key="$3"
+  if [ -f "$backup_dir/$key.present" ]; then
+    cp -a "$backup_dir/$key" "$destination"
+  else
+    rm -f "$destination"
+  fi
+}
+
+remove_venv_link_or_dir() {
+  local path="$1"
+  if [ -L "$path" ]; then
+    rm -f "$path"
+  else
+    rm -rf "$path"
+  fi
+}
+
 install_prerequisites() {
   apt-get update
   DEBIAN_FRONTEND=noninteractive apt-get install -y python3 python3-venv python3-websockets curl ca-certificates
@@ -241,42 +267,75 @@ EOF
 }
 
 install_controller() {
+  local controller_stage controller_backup release old_venv old_release
   echo "$(tr install_controller)"
   install_prerequisites
   install -d -m 0755 "$APP_DIR"
-  source_file "panel.py" "$APP_DIR/panel.py" 0700
-  source_file "ws_hub.py" "$APP_DIR/ws_hub.py" 0700
-  source_file "validate_config.py" "$APP_DIR/validate_config.py" 0700
-  source_file "systemd/vps-probe.service" "$CONTROLLER_SERVICE" 0644
-  source_file "systemd/vps-probe-hub.service" "/etc/systemd/system/vps-probe-hub.service" 0644
+  controller_stage=$(mktemp -d)
+  controller_backup=$(mktemp -d)
+  release="${CONTROLLER_VENV}.release.$(date +%s).$$"
+  old_venv="${CONTROLLER_VENV}.rollback.$$"
 
-  rm -rf "$CONTROLLER_VENV.new"
-  python3 -m venv "$CONTROLLER_VENV.new"
-  "$CONTROLLER_VENV.new/bin/pip" install --no-cache-dir "websockets==10.4"
-  rm -rf "$CONTROLLER_VENV.old"
-  if [ -d "$CONTROLLER_VENV" ]; then
-    mv "$CONTROLLER_VENV" "$CONTROLLER_VENV.old"
-  fi
-  mv "$CONTROLLER_VENV.new" "$CONTROLLER_VENV"
-
-  if [ ! -f "$APP_DIR/config.json" ]; then
-    source_file "config.example.json" "$APP_DIR/config.json" 0600
+  source_file "panel.py" "$controller_stage/panel.py" 0700
+  source_file "ws_hub.py" "$controller_stage/ws_hub.py" 0700
+  source_file "validate_config.py" "$controller_stage/validate_config.py" 0700
+  source_file "systemd/vps-probe.service" "$controller_stage/vps-probe.service" 0644
+  source_file "systemd/vps-probe-hub.service" "$controller_stage/vps-probe-hub.service" 0644
+  if [ -f "$APP_DIR/config.json" ]; then
+    python3 "$controller_stage/validate_config.py" "$APP_DIR/config.json"
   else
-    chmod 600 "$APP_DIR/config.json"
+    source_file "config.example.json" "$controller_stage/config.json" 0600
+    python3 "$controller_stage/validate_config.py" "$controller_stage/config.json"
   fi
-  python3 "$APP_DIR/validate_config.py" "$APP_DIR/config.json"
+  python3 -m venv "$release"
+  "$release/bin/pip" install --no-cache-dir "websockets==10.4"
+  "$release/bin/python" -c 'import websockets; assert websockets.__version__ == "10.4"'
+
+  backup_file "$APP_DIR/panel.py" "$controller_backup" panel.py
+  backup_file "$APP_DIR/ws_hub.py" "$controller_backup" ws_hub.py
+  backup_file "$APP_DIR/validate_config.py" "$controller_backup" validate_config.py
+  backup_file "$CONTROLLER_SERVICE" "$controller_backup" vps-probe.service
+  backup_file "$HUB_SERVICE" "$controller_backup" vps-probe-hub.service
+  if [ -e "$CONTROLLER_VENV" ] || [ -L "$CONTROLLER_VENV" ]; then
+    old_release=$(readlink -f "$CONTROLLER_VENV" 2>/dev/null || true)
+    mv "$CONTROLLER_VENV" "$old_venv"
+  fi
+
+  rollback_controller() {
+    restore_file "$APP_DIR/panel.py" "$controller_backup" panel.py
+    restore_file "$APP_DIR/ws_hub.py" "$controller_backup" ws_hub.py
+    restore_file "$APP_DIR/validate_config.py" "$controller_backup" validate_config.py
+    restore_file "$CONTROLLER_SERVICE" "$controller_backup" vps-probe.service
+    restore_file "$HUB_SERVICE" "$controller_backup" vps-probe-hub.service
+    remove_venv_link_or_dir "$CONTROLLER_VENV"
+    if [ -e "$old_venv" ] || [ -L "$old_venv" ]; then mv "$old_venv" "$CONTROLLER_VENV"; fi
+    systemctl daemon-reload
+    systemctl restart vps-probe.service vps-probe-hub.service || true
+  }
+
+  install -m 0700 "$controller_stage/panel.py" "$APP_DIR/panel.py"
+  install -m 0700 "$controller_stage/ws_hub.py" "$APP_DIR/ws_hub.py"
+  install -m 0700 "$controller_stage/validate_config.py" "$APP_DIR/validate_config.py"
+  install -m 0644 "$controller_stage/vps-probe.service" "$CONTROLLER_SERVICE"
+  install -m 0644 "$controller_stage/vps-probe-hub.service" "$HUB_SERVICE"
+  if [ ! -f "$APP_DIR/config.json" ]; then install -m 0600 "$controller_stage/config.json" "$APP_DIR/config.json"; fi
+  ln -s "$release" "$CONTROLLER_VENV"
 
   systemctl daemon-reload
   systemctl enable vps-probe.service vps-probe-hub.service
-  if ! systemctl restart vps-probe.service vps-probe-hub.service || ! systemctl is-active --quiet vps-probe.service vps-probe-hub.service; then
-    rm -rf "$CONTROLLER_VENV"
-    if [ -d "$CONTROLLER_VENV.old" ]; then
-      mv "$CONTROLLER_VENV.old" "$CONTROLLER_VENV"
-    fi
-    systemctl restart vps-probe.service vps-probe-hub.service || true
+  if ! systemctl restart vps-probe.service vps-probe-hub.service; then
+    rollback_controller
+    rm -rf "$controller_stage" "$controller_backup" "$release"
     return 1
   fi
-  rm -rf "$CONTROLLER_VENV.old"
+  sleep 3
+  if ! systemctl is-active --quiet vps-probe.service vps-probe-hub.service || ! curl -fsS --connect-timeout 3 --max-time 10 http://127.0.0.1:8088/api/status -o /dev/null; then
+    rollback_controller
+    rm -rf "$controller_stage" "$controller_backup" "$release"
+    return 1
+  fi
+  rm -rf "$controller_stage" "$controller_backup" "$old_venv"
+  case "${old_release:-}" in "$CONTROLLER_VENV.release."*) rm -rf "$old_release" ;; esac
   echo "$(tr controller_ready)"
   echo "$(tr config_path): $APP_DIR/config.json"
   echo "$(tr controller_help)"
@@ -286,51 +345,82 @@ install_controller() {
 }
 
 install_agent() {
+  local endpoint token node_id agent_stage agent_backup release old_venv old_release preserve_agent_config
   echo "$(tr install_agent)"
   install_prerequisites
+  agent_stage=$(mktemp -d)
+  agent_backup=$(mktemp -d)
+  release="${AGENT_VENV}.release.$(date +%s).$$"
+  old_venv="${AGENT_VENV}.rollback.$$"
+  preserve_agent_config=false
 
-  local endpoint token node_id
-  endpoint=$(ask "$(tr endpoint)" "wss://agent.example.com/ws")
-  node_id=$(ask "$(tr node_id)" "remote-node")
-  token=$(ask_secret "$(tr token)" "$(generate_token)")
-
-  source_file "agent/vps-probe-agent.py" "$AGENT_SCRIPT" 0700
-  source_file "systemd/vps-probe-agent.service" "$AGENT_SERVICE" 0644
-  rm -rf "$AGENT_VENV.new"
-  python3 -m venv "$AGENT_VENV.new"
-  "$AGENT_VENV.new/bin/pip" install --no-cache-dir "websockets==10.4"
-  rm -rf "$AGENT_VENV.old"
-  if [ -d "$AGENT_VENV" ]; then
-    mv "$AGENT_VENV" "$AGENT_VENV.old"
-  fi
-  mv "$AGENT_VENV.new" "$AGENT_VENV"
-  sed -i 's|^ExecStart=/usr/bin/python3 |ExecStart=/opt/vps-probe-agent-venv/bin/python |' "$AGENT_SERVICE"
-  rm -f /etc/systemd/system/vps-probe-agent.timer
-
-  local config_temp
-  config_temp=$(mktemp "${AGENT_CONFIG}.XXXXXX")
-  cat > "$config_temp" <<EOF
+  if [ -f "$AGENT_CONFIG" ]; then
+    preserve_agent_config=true
+    cp -a "$AGENT_CONFIG" "$agent_stage/config.json"
+    python3 -m json.tool "$agent_stage/config.json" >/dev/null
+    endpoint=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["endpoint"])' "$agent_stage/config.json")
+    node_id="existing-node"
+  else
+    endpoint=$(ask "$(tr endpoint)" "wss://agent.example.com/ws")
+    node_id=$(ask "$(tr node_id)" "remote-node")
+    token=$(ask_secret "$(tr token)" "$(generate_token)")
+    cat > "$agent_stage/config.json" <<EOF
 {
   "endpoint": "$endpoint",
   "token": "$token"
 }
 EOF
-  python3 -m json.tool "$config_temp" >/dev/null
-  chmod 600 "$config_temp"
-  mv -f "$config_temp" "$AGENT_CONFIG"
+    python3 -m json.tool "$agent_stage/config.json" >/dev/null
+    chmod 600 "$agent_stage/config.json"
+  fi
+
+  source_file "agent/vps-probe-agent.py" "$agent_stage/vps-probe-agent.py" 0700
+  source_file "systemd/vps-probe-agent.service" "$agent_stage/vps-probe-agent.service" 0644
+  sed -i 's|^ExecStart=/usr/bin/python3 |ExecStart=/opt/vps-probe-agent-venv/bin/python |' "$agent_stage/vps-probe-agent.service"
+  python3 -m venv "$release"
+  "$release/bin/pip" install --no-cache-dir "websockets==10.4"
+  "$release/bin/python" -c 'import websockets; assert websockets.__version__ == "10.4"'
+
+  backup_file "$AGENT_SCRIPT" "$agent_backup" vps-probe-agent.py
+  backup_file "$AGENT_SERVICE" "$agent_backup" vps-probe-agent.service
+  backup_file "$AGENT_CONFIG" "$agent_backup" config.json
+  if [ -e "$AGENT_VENV" ] || [ -L "$AGENT_VENV" ]; then
+    old_release=$(readlink -f "$AGENT_VENV" 2>/dev/null || true)
+    mv "$AGENT_VENV" "$old_venv"
+  fi
+
+  rollback_agent() {
+    restore_file "$AGENT_SCRIPT" "$agent_backup" vps-probe-agent.py
+    restore_file "$AGENT_SERVICE" "$agent_backup" vps-probe-agent.service
+    restore_file "$AGENT_CONFIG" "$agent_backup" config.json
+    remove_venv_link_or_dir "$AGENT_VENV"
+    if [ -e "$old_venv" ] || [ -L "$old_venv" ]; then mv "$old_venv" "$AGENT_VENV"; fi
+    systemctl daemon-reload
+    systemctl restart vps-probe-agent.service || true
+  }
+
+  install -m 0700 "$agent_stage/vps-probe-agent.py" "$AGENT_SCRIPT"
+  install -m 0644 "$agent_stage/vps-probe-agent.service" "$AGENT_SERVICE"
+  install -m 0600 "$agent_stage/config.json" "$AGENT_CONFIG"
+  ln -s "$release" "$AGENT_VENV"
+  rm -f /etc/systemd/system/vps-probe-agent.timer
 
   systemctl daemon-reload
   systemctl disable --now vps-probe-agent.timer 2>/dev/null || true
   systemctl enable vps-probe-agent.service
-  if ! systemctl restart vps-probe-agent.service || ! systemctl is-active --quiet vps-probe-agent.service; then
-    rm -rf "$AGENT_VENV"
-    if [ -d "$AGENT_VENV.old" ]; then
-      mv "$AGENT_VENV.old" "$AGENT_VENV"
-    fi
-    systemctl restart vps-probe-agent.service || true
+  if ! systemctl restart vps-probe-agent.service; then
+    rollback_agent
+    rm -rf "$agent_stage" "$agent_backup" "$release"
     return 1
   fi
-  rm -rf "$AGENT_VENV.old"
+  sleep 3
+  if ! systemctl is-active --quiet vps-probe-agent.service; then
+    rollback_agent
+    rm -rf "$agent_stage" "$agent_backup" "$release"
+    return 1
+  fi
+  rm -rf "$agent_stage" "$agent_backup" "$old_venv"
+  case "${old_release:-}" in "$AGENT_VENV.release."*) rm -rf "$old_release" ;; esac
 
   echo "$(tr agent_ready)"
   echo "$(tr agent_help)"
@@ -349,7 +439,9 @@ uninstall_probe() {
   systemctl disable --now vps-probe-agent.timer 2>/dev/null || true
   systemctl stop vps-probe-agent.service 2>/dev/null || true
   rm -f "$CONTROLLER_SERVICE" "$HUB_SERVICE" "$AGENT_SERVICE" /etc/systemd/system/vps-probe-agent.timer "$AGENT_SCRIPT" "$AGENT_CONFIG"
-  rm -rf "$AGENT_VENV" "$CONTROLLER_VENV"
+  remove_venv_link_or_dir "$AGENT_VENV"
+  remove_venv_link_or_dir "$CONTROLLER_VENV"
+  rm -rf "$AGENT_VENV".release.* "$CONTROLLER_VENV".release.*
   rm -f /etc/caddy/jager-monitor.caddy /etc/caddy/jager-monitor-panel.caddy /etc/caddy/jager-monitor-agent.caddy
   if [ -f /etc/caddy/Caddyfile ] && grep -Fqx 'import /etc/caddy/*.caddy' /etc/caddy/Caddyfile; then
     sed -i '\|^import /etc/caddy/\\\*\\.caddy$|d' /etc/caddy/Caddyfile
