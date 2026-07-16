@@ -6,6 +6,7 @@ import shutil
 import socket
 import time
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import websockets
 
@@ -120,8 +121,13 @@ def ws_endpoint(value):
     if value.startswith('https://'):
         return 'wss://' + value[8:].split('/')[0] + '/ws'
     if value.startswith('http://'):
-        return 'ws://' + value[7:].split('/')[0] + '/ws'
-    return value
+        raise ValueError('remote agent endpoint must use wss://')
+    parsed = urlsplit(value)
+    if parsed.scheme == 'wss' and parsed.netloc:
+        return value
+    if parsed.scheme == 'ws' and parsed.hostname in ('127.0.0.1', '::1', 'localhost'):
+        return value
+    raise ValueError('remote agent endpoint must use wss://')
 
 
 async def run_agent():
