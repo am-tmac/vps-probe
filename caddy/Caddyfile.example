@@ -1,4 +1,4 @@
-# Panel domain: web dashboard and /api/status.
+# Panel domain: web dashboard and /api/status. The dashboard uses HTTP polling.
 panel.example.com {
     encode gzip zstd
     reverse_proxy 127.0.0.1:8088

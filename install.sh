@@ -2,6 +2,7 @@
 set -euo pipefail
 
 APP_DIR="/opt/vps-probe"
+CONTROLLER_VENV="/opt/vps-probe-controller-venv"
 CONTROLLER_SERVICE="/etc/systemd/system/vps-probe.service"
 AGENT_SCRIPT="/usr/local/sbin/vps-probe-agent.py"
 AGENT_VENV="/opt/vps-probe-agent-venv"
@@ -11,6 +12,7 @@ HUB_SERVICE="/etc/systemd/system/vps-probe-hub.service"
 REPO_RAW="https://raw.githubusercontent.com/am-tmac/jager-monitor/main"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 LANG=""
+umask 077
 
 need_root() {
   if [ "${EUID:-$(id -u)}" -ne 0 ]; then
@@ -105,6 +107,13 @@ ask() {
   printf '%s' "${value:-$default}"
 }
 
+ask_secret() {
+  local label="$1" generated="$2" value
+  read -r -s -p "$label [press Enter to generate]: " value || true
+  echo >&2
+  printf '%s' "${value:-$generated}"
+}
+
 confirm() {
   local answer
   read -r -p "$(tr "$1") $(tr yes_no) " answer || true
@@ -112,17 +121,24 @@ confirm() {
 }
 
 source_file() {
-  local relative="$1" destination="$2" mode="$3"
+  local relative="$1" destination="$2" mode="$3" temp
+  temp=$(mktemp "${destination}.XXXXXX")
   if [ -f "$SCRIPT_DIR/$relative" ]; then
-    install -m "$mode" "$SCRIPT_DIR/$relative" "$destination"
+    install -m "$mode" "$SCRIPT_DIR/$relative" "$temp"
   else
-    if ! curl -fsSL "$REPO_RAW/$relative" -o "$destination"; then
-      rm -f "$destination"
+    if ! curl -fsSL "$REPO_RAW/$relative" -o "$temp"; then
+      rm -f "$temp"
       echo "$(tr fetch_failed)" >&2
       exit 1
     fi
-    chmod "$mode" "$destination"
+    chmod "$mode" "$temp"
   fi
+  case "$relative" in
+    *.py) python3 -m py_compile "$temp" ;;
+    *.json) python3 -m json.tool "$temp" >/dev/null ;;
+    *.sh) bash -n "$temp" ;;
+  esac
+  mv -f "$temp" "$destination"
 }
 
 install_prerequisites() {
@@ -230,17 +246,37 @@ install_controller() {
   install -d -m 0755 "$APP_DIR"
   source_file "panel.py" "$APP_DIR/panel.py" 0700
   source_file "ws_hub.py" "$APP_DIR/ws_hub.py" 0700
+  source_file "validate_config.py" "$APP_DIR/validate_config.py" 0700
   source_file "systemd/vps-probe.service" "$CONTROLLER_SERVICE" 0644
   source_file "systemd/vps-probe-hub.service" "/etc/systemd/system/vps-probe-hub.service" 0644
+
+  rm -rf "$CONTROLLER_VENV.new"
+  python3 -m venv "$CONTROLLER_VENV.new"
+  "$CONTROLLER_VENV.new/bin/pip" install --no-cache-dir "websockets==10.4"
+  rm -rf "$CONTROLLER_VENV.old"
+  if [ -d "$CONTROLLER_VENV" ]; then
+    mv "$CONTROLLER_VENV" "$CONTROLLER_VENV.old"
+  fi
+  mv "$CONTROLLER_VENV.new" "$CONTROLLER_VENV"
 
   if [ ! -f "$APP_DIR/config.json" ]; then
     source_file "config.example.json" "$APP_DIR/config.json" 0600
   else
     chmod 600 "$APP_DIR/config.json"
   fi
+  python3 "$APP_DIR/validate_config.py" "$APP_DIR/config.json"
 
   systemctl daemon-reload
-  systemctl enable --now vps-probe.service vps-probe-hub.service
+  systemctl enable vps-probe.service vps-probe-hub.service
+  if ! systemctl restart vps-probe.service vps-probe-hub.service || ! systemctl is-active --quiet vps-probe.service vps-probe-hub.service; then
+    rm -rf "$CONTROLLER_VENV"
+    if [ -d "$CONTROLLER_VENV.old" ]; then
+      mv "$CONTROLLER_VENV.old" "$CONTROLLER_VENV"
+    fi
+    systemctl restart vps-probe.service vps-probe-hub.service || true
+    return 1
+  fi
+  rm -rf "$CONTROLLER_VENV.old"
   echo "$(tr controller_ready)"
   echo "$(tr config_path): $APP_DIR/config.json"
   echo "$(tr controller_help)"
@@ -256,27 +292,45 @@ install_agent() {
   local endpoint token node_id
   endpoint=$(ask "$(tr endpoint)" "wss://agent.example.com/ws")
   node_id=$(ask "$(tr node_id)" "remote-node")
-  token=$(ask "$(tr token)" "$(generate_token)")
+  token=$(ask_secret "$(tr token)" "$(generate_token)")
 
   source_file "agent/vps-probe-agent.py" "$AGENT_SCRIPT" 0700
   source_file "systemd/vps-probe-agent.service" "$AGENT_SERVICE" 0644
-  rm -rf "$AGENT_VENV"
-  python3 -m venv "$AGENT_VENV"
-  "$AGENT_VENV/bin/pip" install --no-cache-dir "websockets==10.4"
+  rm -rf "$AGENT_VENV.new"
+  python3 -m venv "$AGENT_VENV.new"
+  "$AGENT_VENV.new/bin/pip" install --no-cache-dir "websockets==10.4"
+  rm -rf "$AGENT_VENV.old"
+  if [ -d "$AGENT_VENV" ]; then
+    mv "$AGENT_VENV" "$AGENT_VENV.old"
+  fi
+  mv "$AGENT_VENV.new" "$AGENT_VENV"
   sed -i 's|^ExecStart=/usr/bin/python3 |ExecStart=/opt/vps-probe-agent-venv/bin/python |' "$AGENT_SERVICE"
   rm -f /etc/systemd/system/vps-probe-agent.timer
 
-  cat > "$AGENT_CONFIG" <<EOF
+  local config_temp
+  config_temp=$(mktemp "${AGENT_CONFIG}.XXXXXX")
+  cat > "$config_temp" <<EOF
 {
   "endpoint": "$endpoint",
   "token": "$token"
 }
 EOF
-  chmod 600 "$AGENT_CONFIG"
+  python3 -m json.tool "$config_temp" >/dev/null
+  chmod 600 "$config_temp"
+  mv -f "$config_temp" "$AGENT_CONFIG"
 
   systemctl daemon-reload
   systemctl disable --now vps-probe-agent.timer 2>/dev/null || true
-  systemctl enable --now vps-probe-agent.service
+  systemctl enable vps-probe-agent.service
+  if ! systemctl restart vps-probe-agent.service || ! systemctl is-active --quiet vps-probe-agent.service; then
+    rm -rf "$AGENT_VENV"
+    if [ -d "$AGENT_VENV.old" ]; then
+      mv "$AGENT_VENV.old" "$AGENT_VENV"
+    fi
+    systemctl restart vps-probe-agent.service || true
+    return 1
+  fi
+  rm -rf "$AGENT_VENV.old"
 
   echo "$(tr agent_ready)"
   echo "$(tr agent_help)"
@@ -295,7 +349,7 @@ uninstall_probe() {
   systemctl disable --now vps-probe-agent.timer 2>/dev/null || true
   systemctl stop vps-probe-agent.service 2>/dev/null || true
   rm -f "$CONTROLLER_SERVICE" "$HUB_SERVICE" "$AGENT_SERVICE" /etc/systemd/system/vps-probe-agent.timer "$AGENT_SCRIPT" "$AGENT_CONFIG"
-  rm -rf "$AGENT_VENV"
+  rm -rf "$AGENT_VENV" "$CONTROLLER_VENV"
   rm -f /etc/caddy/jager-monitor.caddy /etc/caddy/jager-monitor-panel.caddy /etc/caddy/jager-monitor-agent.caddy
   if [ -f /etc/caddy/Caddyfile ] && grep -Fqx 'import /etc/caddy/*.caddy' /etc/caddy/Caddyfile; then
     sed -i '\|^import /etc/caddy/\\\*\\.caddy$|d' /etc/caddy/Caddyfile

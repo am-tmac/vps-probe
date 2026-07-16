@@ -3,15 +3,21 @@ import hmac
 import json
 import shlex
 import subprocess
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 CONFIG_PATH = Path('/opt/vps-probe/config.json')
 STATE_PATH = Path('/opt/vps-probe/state.json')
+STATE_BACKUP_PATH = Path('/opt/vps-probe/state.json.bak')
 STALE_SECONDS = 120
 STATUS_CACHE_SECONDS = 2
 STATUS_CACHE = {'at': 0.0, 'nodes': None}
+STATUS_CACHE_LOCK = threading.Lock()
+HTTP_CONNECTION_TIMEOUT = 10
+MAX_HTTP_WORKERS = 32
+HTTP_WORKER_SEMAPHORE = threading.BoundedSemaphore(MAX_HTTP_WORKERS)
 COLLECT_SH = r'''set -e
 j(){ printf '%s' "$1"|sed 's/\\/\\\\/g;s/"/\\"/g'; }
 h=$(hostname); u=$(awk '{print int($1)}' /proc/uptime); l=$(cut -d' ' -f1-3 /proc/loadavg); c=$(nproc)
@@ -23,12 +29,48 @@ read rx tx < <(awk 'BEGIN{r=0;t=0}$1~/^[a-zA-Z0-9_.-]+:$/ {x=$1;gsub(":","",x);i
 tcp=$(ss -tan|awk 'NR>1{n++}END{print n+0}'); udp=$(ss -uan|awk 'NR>1{n++}END{print n+0}'); p=$(ps -e --no-headers|wc -l|tr -d ' '); os=$(awk -F= '/^PRETTY_NAME=/{gsub(/"/,"",$2);print $2}' /etc/os-release); now=$(date +%s)
 printf '{"hostname":"%s","uptime_sec":%s,"load":"%s","load1":%s,"cpu_count":%s,"cpu_usage_percent":%s,"mem_total_mb":%s,"mem_used_mb":%s,"swap_total_mb":%s,"swap_used_mb":%s,"disk_total_mb":%s,"disk_used_mb":%s,"disk_avail_mb":%s,"disk_percent":%s,"net_rx_bytes":%s,"net_tx_bytes":%s,"tcp_count":%s,"udp_count":%s,"process_count":%s,"os":"%s","kernel":"%s","arch":"%s","ts":%s}\n' "$(j "$h")" "$u" "$(j "$l")" "${l%% *}" "$c" "$cpu" "$mt" "$mu" "$st" "$((st-sf))" "$dt" "$du" "$da" "$dp" "$rx" "$tx" "$tcp" "$udp" "$p" "$(j "$os")" "$(uname -r)" "$(uname -m)" "$now"'''
 
-HTML_PAGE = '''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Jager Monitor</title><style>:root{--ink:#1a1d24;--muted:#727785;--line:#e8eaf0;--surface:#fff;--page:#f6f7fa;--blue:#2962ff;--green:#18a957;--amber:#df8a25;--purple:#8d4bd7;--red:#dd4056}html[data-theme="dark"]{--ink:#f0f3f9;--muted:#9ca6b7;--line:#273040;--surface:#131a25;--page:#0d121a;--blue:#6d96ff;--green:#49cf89;--amber:#f2ae54;--purple:#b88cff;--red:#ff7185}*{box-sizing:border-box}body{margin:0;background:var(--page);color:var(--ink);font:14px/1.45 Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.shell{max-width:1440px;margin:auto;padding:28px 24px 40px}.mast{display:flex;align-items:center;justify-content:space-between;margin-bottom:26px}.brand{display:flex;align-items:center;gap:12px;font-size:20px;font-weight:750}.mark{display:grid;place-items:center;width:32px;height:32px;background:var(--blue);color:#fff;font-size:16px;font-weight:800;border-radius:7px}.live{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:12px}.theme{display:grid;place-items:center;width:30px;height:30px;line-height:1;border:1px solid var(--line);border-radius:6px;background:var(--surface);color:var(--ink);cursor:pointer;font-size:15px;padding:0}.theme:hover{border-color:var(--blue)}.theme::first-letter{position:relative;top:-1px}.pulse{width:8px;height:8px;border-radius:50%;background:var(--green);box-shadow:0 0 0 4px #dff5e8}.overview{display:grid;grid-template-columns:repeat(4,minmax(130px,1fr));border:1px solid var(--line);background:var(--surface);border-radius:8px;margin-bottom:22px}.overview>div{padding:15px 18px;border-right:1px solid var(--line)}.overview>div:last-child{border:0}.k{font-size:12px;color:var(--muted);margin-bottom:4px}.v{font-size:22px;font-weight:720;font-variant-numeric:tabular-nums}.nodes{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:16px}.node{background:var(--surface);border:1px solid var(--line);border-radius:8px;overflow:hidden}.offline{opacity:.72}.node-head{display:flex;align-items:flex-start;justify-content:space-between;padding:17px 18px 14px;border-bottom:1px solid var(--line)}.node-title{display:flex;gap:10px;align-items:center;min-width:0}.flag{font-size:20px}.name{font-weight:720;font-size:16px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.region{font-size:12px;color:var(--muted);margin-top:2px}.state{display:flex;align-items:center;gap:6px;font-size:11px;font-weight:700;color:var(--green)}.state i{width:7px;height:7px;border-radius:50%;background:currentColor}.offline .state{color:var(--red)}.stats{display:grid;grid-template-columns:repeat(2,1fr);padding:13px 18px 8px;gap:0 20px}.stat{padding:8px 0;border-bottom:1px solid #f0f1f4}.stat:nth-last-child(-n+2){border-bottom:0}.sline{display:flex;justify-content:space-between;gap:8px}.label,.sub{color:var(--muted);font-size:12px}.value{font-weight:680;font-variant-numeric:tabular-nums;text-align:right}.sub{text-align:right;font-size:11px;margin-top:2px}.trends{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;padding:8px 18px 17px}.trend{border:1px solid #edf0f5;border-radius:6px;padding:8px 9px}.trend-k{font-size:10px;font-weight:700;color:var(--muted);letter-spacing:.35px}.trend svg{width:100%;height:28px;display:block;margin-top:5px}.foot{display:flex;justify-content:space-between;background:var(--surface);border-top:1px solid var(--line);padding:10px 18px;color:var(--muted);font-size:11px}.error{padding:20px 18px;color:var(--red)}@media(max-width:700px){.shell{padding:18px 14px}.overview{grid-template-columns:repeat(2,1fr)}.overview>div:nth-child(2){border-right:0}.overview>div:nth-child(-n+2){border-bottom:1px solid var(--line)}.nodes{grid-template-columns:1fr}.stats{gap:0 14px}.trends{padding-left:14px;padding-right:14px}.node-head,.stats,.foot{padding-left:14px;padding-right:14px}}</style></head><body><main class="shell"><header class="mast"><div class="brand"><span class="mark">J</span><span>Jager Monitor</span></div><div class="live"><span class="pulse"></span><span id="refresh">Connecting</span><button class="theme" id="theme" type="button" aria-label="Toggle color theme" title="Toggle day/night mode">☾</button></div></header><section class="overview" id="overview"></section><section class="nodes" id="nodes"></section></main><script>const pref=localStorage.getItem('jager-theme')||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');const applyTheme=t=>{document.documentElement.dataset.theme=t;document.getElementById('theme').textContent=t==='dark'?'☀':'☾';localStorage.setItem('jager-theme',t)};applyTheme(pref);document.getElementById('theme').onclick=()=>applyTheme(document.documentElement.dataset.theme==='dark'?'light':'dark');const hist=new Map(),max=28;const E=v=>String(v??'').replace(/[&<>"']/g,x=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[x]));const P=(a,b)=>b?Math.round(Number(a||0)*100/Number(b)):0;function B(v){v=Number(v||0);let u=['B','KB','MB','GB','TB'],i=0;while(v>=1024&&i<u.length-1){v/=1024;i++}return v.toFixed(i?1:0)+u[i]}function R(v){return Number(v)>0?B(v)+'/s':'0B/s'}function U(v){v=Number(v||0);let d=Math.floor(v/86400),h=Math.floor(v%86400/3600),m=Math.floor(v%3600/60);return d?d+'d '+h+'h':h+'h '+m+'m'}function L(a,c){if(!a.length)return '';let hi=Math.max(...a,1),lo=Math.min(...a,0),s=Math.max(1,hi-lo),p=a.map((v,i)=>(i/Math.max(1,a.length-1)*100)+','+(28-((v-lo)/s*22+3))).join(' ');return '<svg viewBox="0 0 100 28" preserveAspectRatio="none"><polyline fill="none" stroke="'+c+'" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" points="'+p+'"/></svg>'}function H(n){let h=hist.get(n.name)||{c:[],m:[],n:[]};h.c.push(+n.cpu_usage_percent||0);h.m.push(P(n.mem_used_mb,n.mem_total_mb));h.n.push((+n.rx_speed_bps||0)+(+n.tx_speed_bps||0));Object.values(h).forEach(a=>{while(a.length>max)a.shift()});hist.set(n.name,h);return h}function S(k,v,s=''){return '<div class="stat"><div class="sline"><span class="label">'+k+'</span><span class="value">'+v+'</span></div>'+(s?'<div class="sub">'+s+'</div>':'')+'</div>'}function Card(n){let h=H(n),m=P(n.mem_used_mb,n.mem_total_mb),d=+n.disk_percent||0,on=n.online;return '<article class="node '+(on?'':'offline')+'"><div class="node-head"><div class="node-title"><span class="flag">'+E(n.flag||'')+'</span><div><div class="name">'+E(n.name)+'</div><div class="region">'+E(n.region||'')+' · '+E(String(n.os||'').replace('GNU/Linux','').replace(' LTS',''))+'</div></div></div><span class="state"><i></i>'+(on?'ONLINE':'OFFLINE')+'</span></div>'+(on?'<div class="stats">'+S('CPU',(+(n.cpu_usage_percent||0)).toFixed(1)+'%',E(n.load||'0')+' load · '+E(n.cpu_count||0)+' cores')+S('Memory',m+'%',B((+n.mem_used_mb||0)*1048576)+' / '+B((+n.mem_total_mb||0)*1048576))+S('Disk',d+'%',B((+n.disk_used_mb||0)*1048576)+' used')+S('Network',R(n.rx_speed_bps)+' ↓',R(n.tx_speed_bps)+' ↑')+'</div><div class="trends"><div class="trend"><div class="trend-k">CPU</div>'+L(h.c,'#2962ff')+'</div><div class="trend"><div class="trend-k">MEMORY</div>'+L(h.m,'#8d4bd7')+'</div><div class="trend"><div class="trend-k">NETWORK</div>'+L(h.n,'#df8a25')+'</div></div><div class="foot"><span>'+E(n.arch||'')+' · '+E(n.tcp_count||0)+' TCP / '+E(n.udp_count||0)+' UDP</span><span>'+U(n.uptime_sec)+'</span></div>':'<div class="error">'+E(n.error||'No recent agent report')+'</div>')+'</article>'}function Draw(a){let on=a.filter(n=>n.online),avg=f=>on.length?Math.round(on.reduce((s,n)=>s+(+f(n)||0),0)/on.length):0,total=on.reduce((s,n)=>s+(+n.net_rx_bytes||0)+(+n.net_tx_bytes||0),0);document.getElementById('overview').innerHTML=[['Nodes',on.length+'/'+a.length],['Avg CPU',avg(n=>n.cpu_usage_percent)+'%'],['Avg Memory',avg(n=>P(n.mem_used_mb,n.mem_total_mb))+'%'],['Total Traffic',B(total)]].map(x=>'<div><div class="k">'+x[0]+'</div><div class="v">'+x[1]+'</div></div>').join('');document.getElementById('nodes').innerHTML=a.map(Card).join('')}async function load(){try{let r=await fetch('/api/status',{cache:'no-store'}),d=await r.json(),a=d.nodes.sort((x,y)=>x.online===y.online?0:x.online?1:-1);Draw(a);document.getElementById('refresh').textContent='Live · '+new Date().toLocaleTimeString()}catch(e){document.getElementById('refresh').textContent='Connection error'}}load();let ws;function C(){ws=new WebSocket((location.protocol==='https:'?'wss':'ws')+'://'+location.host+'/ws');ws.onopen=()=>ws.send(JSON.stringify({role:'browser'}));ws.onmessage=e=>{try{if(JSON.parse(e.data).type==='update')load()}catch(_){}};ws.onclose=()=>setTimeout(C,2500)}C();</script></body></html>'''
+HTML_PAGE = '''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Jager Monitor</title><style>:root{--ink:#1a1d24;--muted:#727785;--line:#e8eaf0;--surface:#fff;--page:#f6f7fa;--blue:#2962ff;--green:#18a957;--amber:#df8a25;--purple:#8d4bd7;--red:#dd4056}html[data-theme="dark"]{--ink:#f0f3f9;--muted:#9ca6b7;--line:#273040;--surface:#131a25;--page:#0d121a;--blue:#6d96ff;--green:#49cf89;--amber:#f2ae54;--purple:#b88cff;--red:#ff7185}*{box-sizing:border-box}body{margin:0;background:var(--page);color:var(--ink);font:14px/1.45 Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.shell{max-width:1440px;margin:auto;padding:28px 24px 40px}.mast{display:flex;align-items:center;justify-content:space-between;margin-bottom:26px}.brand{display:flex;align-items:center;gap:12px;font-size:20px;font-weight:750}.mark{display:grid;place-items:center;width:32px;height:32px;background:var(--blue);color:#fff;font-size:16px;font-weight:800;border-radius:7px}.live{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:12px}.theme{display:grid;place-items:center;width:30px;height:30px;line-height:1;border:1px solid var(--line);border-radius:6px;background:var(--surface);color:var(--ink);cursor:pointer;font-size:15px;padding:0}.theme:hover{border-color:var(--blue)}.theme::first-letter{position:relative;top:-1px}.pulse{width:8px;height:8px;border-radius:50%;background:var(--green);box-shadow:0 0 0 4px #dff5e8}.overview{display:grid;grid-template-columns:repeat(4,minmax(130px,1fr));border:1px solid var(--line);background:var(--surface);border-radius:8px;margin-bottom:22px}.overview>div{padding:15px 18px;border-right:1px solid var(--line)}.overview>div:last-child{border:0}.k{font-size:12px;color:var(--muted);margin-bottom:4px}.v{font-size:22px;font-weight:720;font-variant-numeric:tabular-nums}.nodes{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:16px}.node{background:var(--surface);border:1px solid var(--line);border-radius:8px;overflow:hidden}.offline{opacity:.72}.node-head{display:flex;align-items:flex-start;justify-content:space-between;padding:17px 18px 14px;border-bottom:1px solid var(--line)}.node-title{display:flex;gap:10px;align-items:center;min-width:0}.flag{font-size:20px}.name{font-weight:720;font-size:16px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.region{font-size:12px;color:var(--muted);margin-top:2px}.state{display:flex;align-items:center;gap:6px;font-size:11px;font-weight:700;color:var(--green)}.state i{width:7px;height:7px;border-radius:50%;background:currentColor}.offline .state{color:var(--red)}.stats{display:grid;grid-template-columns:repeat(2,1fr);padding:13px 18px 8px;gap:0 20px}.stat{padding:8px 0;border-bottom:1px solid #f0f1f4}.stat:nth-last-child(-n+2){border-bottom:0}.sline{display:flex;justify-content:space-between;gap:8px}.label,.sub{color:var(--muted);font-size:12px}.value{font-weight:680;font-variant-numeric:tabular-nums;text-align:right}.sub{text-align:right;font-size:11px;margin-top:2px}.trends{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;padding:8px 18px 17px}.trend{border:1px solid #edf0f5;border-radius:6px;padding:8px 9px}.trend-k{font-size:10px;font-weight:700;color:var(--muted);letter-spacing:.35px}.trend svg{width:100%;height:28px;display:block;margin-top:5px}.foot{display:flex;justify-content:space-between;background:var(--surface);border-top:1px solid var(--line);padding:10px 18px;color:var(--muted);font-size:11px}.error{padding:20px 18px;color:var(--red)}@media(max-width:700px){.shell{padding:18px 14px}.overview{grid-template-columns:repeat(2,1fr)}.overview>div:nth-child(2){border-right:0}.overview>div:nth-child(-n+2){border-bottom:1px solid var(--line)}.nodes{grid-template-columns:1fr}.stats{gap:0 14px}.trends{padding-left:14px;padding-right:14px}.node-head,.stats,.foot{padding-left:14px;padding-right:14px}}</style></head><body><main class="shell"><header class="mast"><div class="brand"><span class="mark">J</span><span>Jager Monitor</span></div><div class="live"><span class="pulse"></span><span id="refresh">Connecting</span><button class="theme" id="theme" type="button" aria-label="Toggle color theme" title="Toggle day/night mode">☾</button></div></header><section class="overview" id="overview"></section><section class="nodes" id="nodes"></section></main><script>const pref=localStorage.getItem('jager-theme')||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');const applyTheme=t=>{document.documentElement.dataset.theme=t;document.getElementById('theme').textContent=t==='dark'?'☀':'☾';localStorage.setItem('jager-theme',t)};applyTheme(pref);document.getElementById('theme').onclick=()=>applyTheme(document.documentElement.dataset.theme==='dark'?'light':'dark');const hist=new Map(),max=28;const E=v=>String(v??'').replace(/[&<>"']/g,x=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[x]));const P=(a,b)=>b?Math.round(Number(a||0)*100/Number(b)):0;function B(v){v=Number(v||0);let u=['B','KB','MB','GB','TB'],i=0;while(v>=1024&&i<u.length-1){v/=1024;i++}return v.toFixed(i?1:0)+u[i]}function R(v){return Number(v)>0?B(v)+'/s':'0B/s'}function U(v){v=Number(v||0);let d=Math.floor(v/86400),h=Math.floor(v%86400/3600),m=Math.floor(v%3600/60);return d?d+'d '+h+'h':h+'h '+m+'m'}function L(a,c){if(!a.length)return '';let hi=Math.max(...a,1),lo=Math.min(...a,0),s=Math.max(1,hi-lo),p=a.map((v,i)=>(i/Math.max(1,a.length-1)*100)+','+(28-((v-lo)/s*22+3))).join(' ');return '<svg viewBox="0 0 100 28" preserveAspectRatio="none"><polyline fill="none" stroke="'+c+'" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" points="'+p+'"/></svg>'}function H(n){let h=hist.get(n.name)||{c:[],m:[],n:[]};h.c.push(+n.cpu_usage_percent||0);h.m.push(P(n.mem_used_mb,n.mem_total_mb));h.n.push((+n.rx_speed_bps||0)+(+n.tx_speed_bps||0));Object.values(h).forEach(a=>{while(a.length>max)a.shift()});hist.set(n.name,h);return h}function S(k,v,s=''){return '<div class="stat"><div class="sline"><span class="label">'+k+'</span><span class="value">'+v+'</span></div>'+(s?'<div class="sub">'+s+'</div>':'')+'</div>'}function Card(n){let h=H(n),m=P(n.mem_used_mb,n.mem_total_mb),d=+n.disk_percent||0,on=n.online;return '<article class="node '+(on?'':'offline')+'"><div class="node-head"><div class="node-title"><span class="flag">'+E(n.flag||'')+'</span><div><div class="name">'+E(n.name)+'</div><div class="region">'+E(n.region||'')+' · '+E(String(n.os||'').replace('GNU/Linux','').replace(' LTS',''))+'</div></div></div><span class="state"><i></i>'+(on?'ONLINE':'OFFLINE')+'</span></div>'+(on?'<div class="stats">'+S('CPU',(+(n.cpu_usage_percent||0)).toFixed(1)+'%',E(n.load||'0')+' load · '+E(n.cpu_count||0)+' cores')+S('Memory',m+'%',B((+n.mem_used_mb||0)*1048576)+' / '+B((+n.mem_total_mb||0)*1048576))+S('Disk',d+'%',B((+n.disk_used_mb||0)*1048576)+' used')+S('Network',R(n.rx_speed_bps)+' ↓',R(n.tx_speed_bps)+' ↑')+'</div><div class="trends"><div class="trend"><div class="trend-k">CPU</div>'+L(h.c,'#2962ff')+'</div><div class="trend"><div class="trend-k">MEMORY</div>'+L(h.m,'#8d4bd7')+'</div><div class="trend"><div class="trend-k">NETWORK</div>'+L(h.n,'#df8a25')+'</div></div><div class="foot"><span>'+E(n.arch||'')+' · '+E(n.tcp_count||0)+' TCP / '+E(n.udp_count||0)+' UDP</span><span>'+U(n.uptime_sec)+'</span></div>':'<div class="error">'+E(n.error||'No recent agent report')+'</div>')+'</article>'}function Draw(a){let on=a.filter(n=>n.online),avg=f=>on.length?Math.round(on.reduce((s,n)=>s+(+f(n)||0),0)/on.length):0,total=on.reduce((s,n)=>s+(+n.net_rx_bytes||0)+(+n.net_tx_bytes||0),0);document.getElementById('overview').innerHTML=[['Nodes',on.length+'/'+a.length],['Avg CPU',avg(n=>n.cpu_usage_percent)+'%'],['Avg Memory',avg(n=>P(n.mem_used_mb,n.mem_total_mb))+'%'],['Total Traffic',B(total)]].map(x=>'<div><div class="k">'+x[0]+'</div><div class="v">'+x[1]+'</div></div>').join('');document.getElementById('nodes').innerHTML=a.map(Card).join('')}async function load(){try{let r=await fetch('/api/status',{cache:'no-store'}),d=await r.json(),a=d.nodes.sort((x,y)=>x.online===y.online?0:x.online?1:-1);Draw(a);document.getElementById('refresh').textContent='Live · '+new Date().toLocaleTimeString()}catch(e){document.getElementById('refresh').textContent='Connection error'}}load();setInterval(load,5000);</script></body></html>'''
 
-def config(): return json.loads(CONFIG_PATH.read_text())
+def config():
+    data = json.loads(CONFIG_PATH.read_text())
+    if not isinstance(data, dict) or not isinstance(data.get('nodes', []), list):
+        raise ValueError('config nodes must be a list')
+    ids = set()
+    for index, node in enumerate(data.get('nodes', [])):
+        if not isinstance(node, dict):
+            raise ValueError(f'node {index} must be an object')
+        for field in ('id', 'name', 'type'):
+            if not isinstance(node.get(field), str) or not node[field].strip():
+                raise ValueError(f'node {index} has invalid {field}')
+        if node['id'] in ids:
+            raise ValueError(f'duplicate node id: {node["id"]}')
+        ids.add(node['id'])
+        if node['type'] not in ('local', 'agent'):
+            raise ValueError(f'node {node["id"]} has invalid type')
+    return data
+
+
+def reject_json_constant(value):
+    raise ValueError(f'invalid JSON constant: {value}')
+
+
+def _read_state(path):
+    data = json.loads(path.read_text(), parse_constant=reject_json_constant)
+    if not isinstance(data, dict):
+        raise ValueError('state must be an object')
+    return data
+
+
 def state():
-    try: return json.loads(STATE_PATH.read_text())
-    except (FileNotFoundError,json.JSONDecodeError): return {}
+    if not STATE_PATH.exists() and not STATE_BACKUP_PATH.exists():
+        return {}
+    try:
+        return _read_state(STATE_PATH)
+    except (OSError, json.JSONDecodeError, ValueError) as primary_error:
+        try:
+            return _read_state(STATE_BACKUP_PATH)
+        except (OSError, json.JSONDecodeError, ValueError) as backup_error:
+            raise RuntimeError(f'state file and backup are invalid: {primary_error}; {backup_error}')
 def local():
     p=subprocess.run('bash -lc '+shlex.quote(COLLECT_SH),shell=True,text=True,capture_output=True,timeout=7)
     if p.returncode: raise RuntimeError((p.stderr or p.stdout)[-300:])
@@ -37,33 +79,107 @@ def nodes():
     now = time.time()
     if STATUS_CACHE['nodes'] is not None and now - STATUS_CACHE['at'] < STATUS_CACHE_SECONDS:
         return STATUS_CACHE['nodes']
-    now = int(now)
-    saved=state(); out=[]
-    for n in config().get('nodes',[]):
-        r={'name':n['name'],'type':n['type'],'flag':n.get('flag',''),'region':n.get('region',''),'online':False}
-        try:
-            if n['type']=='local': r.update(local());r['reported_at']=now;r['online']=True
-            else:
-                x=saved.get(n['id'])
-                if not x:r['error']='No agent report received'
-                elif now-int(x.get('reported_at',0))>STALE_SECONDS:r['error']='Agent report stale'
-                else:r.update(x);r['online']=True
-        except Exception as e:r['error']=str(e)
-        r.pop('hostname',None);out.append(r)
-    STATUS_CACHE['at'] = time.time()
-    STATUS_CACHE['nodes'] = out
-    return out
+    with STATUS_CACHE_LOCK:
+        now = time.time()
+        if STATUS_CACHE['nodes'] is not None and now - STATUS_CACHE['at'] < STATUS_CACHE_SECONDS:
+            return STATUS_CACHE['nodes']
+        current = int(now)
+        saved = state()
+        out = []
+        for n in config().get('nodes', []):
+            r = {'name': n['name'], 'type': n['type'], 'flag': n.get('flag', ''), 'region': n.get('region', ''), 'online': False}
+            try:
+                if n['type'] == 'local':
+                    r.update(local())
+                    r['reported_at'] = current
+                    r['online'] = True
+                else:
+                    x = saved.get(n['id'])
+                    if not x:
+                        r['error'] = 'No agent report received'
+                    elif int(x.get('reported_at', 0)) > current + STALE_SECONDS:
+                        r['error'] = 'Agent report timestamp invalid'
+                    elif current - int(x.get('reported_at', 0)) > STALE_SECONDS:
+                        r['error'] = 'Agent report stale'
+                    else:
+                        r.update(x)
+                        r['online'] = True
+            except Exception as exc:
+                r['error'] = str(exc)
+            r.pop('hostname', None)
+            out.append(r)
+        STATUS_CACHE['at'] = time.time()
+        STATUS_CACHE['nodes'] = out
+        return out
+
 class Handler(BaseHTTPRequestHandler):
-    server_version='JagerMonitor/1.0'
-    def log_message(self,*a):pass
-    def send(self,c,b,t='application/json; charset=utf-8'):
-        self.send_response(c);self.send_header('Content-Type',t);self.send_header('Content-Length',str(len(b)));self.send_header('Cache-Control','no-store');self.end_headers();self.wfile.write(b)
+    server_version = 'JagerMonitor/1.0'
+
+    def setup(self):
+        super().setup()
+        self.connection.settimeout(HTTP_CONNECTION_TIMEOUT)
+
+    def log_message(self, *args):
+        pass
+
+    def send(self, code, body, content_type='application/json; charset=utf-8'):
+        self.send_response(code)
+        self.send_header('Content-Type', content_type)
+        self.send_header('Content-Length', str(len(body)))
+        self.send_header('Cache-Control', 'no-store')
+        self.send_header('X-Content-Type-Options', 'nosniff')
+        self.send_header('X-Frame-Options', 'DENY')
+        self.send_header('Content-Security-Policy', "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'")
+        self.end_headers()
+        if self.command != 'HEAD':
+            self.wfile.write(body)
+
+    def do_HEAD(self):
+        if self.path == '/' or self.path.startswith('/?'):
+            self.send(200, b'', 'text/html; charset=utf-8')
+        elif self.path == '/api/status' or self.path.startswith('/api/status?'):
+            self.send(200, b'')
+        else:
+            self.send(404, b'', 'text/plain')
+
     def do_GET(self):
-        if self.path=='/' or self.path.startswith('/?'):self.send(200,HTML_PAGE.encode(),'text/html; charset=utf-8')
-        elif self.path.startswith('/api/status'):self.send(200,json.dumps({'nodes':nodes(),'ts':int(time.time())},ensure_ascii=False).encode())
-        else:self.send(404,b'not found','text/plain')
+        try:
+            if self.path == '/' or self.path.startswith('/?'):
+                self.send(200, HTML_PAGE.encode(), 'text/html; charset=utf-8')
+            elif self.path == '/api/status' or self.path.startswith('/api/status?'):
+                payload = json.dumps({'nodes': nodes(), 'ts': int(time.time())}, ensure_ascii=False, allow_nan=False).encode()
+                self.send(200, payload)
+            else:
+                self.send(404, b'not found', 'text/plain')
+        except Exception:
+            self.send(503, b'{"error":"status unavailable"}')
+
     def do_POST(self):
-        self.send(404,b'not found','text/plain')
+        self.send(404, b'not found', 'text/plain')
+
+
+class BoundedThreadingHTTPServer(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def process_request(self, request, client_address):
+        if not HTTP_WORKER_SEMAPHORE.acquire(blocking=False):
+            request.close()
+            return
+        try:
+            request.settimeout(HTTP_CONNECTION_TIMEOUT)
+            super().process_request(request, client_address)
+        except Exception:
+            HTTP_WORKER_SEMAPHORE.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            HTTP_WORKER_SEMAPHORE.release()
+
+
 def main():
-    c=config();ThreadingHTTPServer((c.get('listen','127.0.0.1'),int(c.get('port',8088))),Handler).serve_forever()
+    c = config()
+    BoundedThreadingHTTPServer((c.get('listen', '127.0.0.1'), int(c.get('port', 8088))), Handler).serve_forever()
 if __name__=='__main__':main()
