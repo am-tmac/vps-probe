@@ -20,6 +20,20 @@ def load(name, path):
     return module
 
 
+def report(cpu=12.5, ts=1):
+    return {
+        'uptime_sec': 1,
+        'cpu_usage_percent': cpu,
+        'mem_total_mb': 1024,
+        'mem_used_mb': 512,
+        'disk_percent': 10,
+        'net_rx_bytes': 1,
+        'net_tx_bytes': 2,
+        'ts': ts,
+        'os': 'Linux',
+    }
+
+
 async def main():
     hub = load('smoke_hub', 'ws_hub.py')
     with tempfile.TemporaryDirectory() as raw:
@@ -45,19 +59,14 @@ async def main():
                 await ws.send(json.dumps({'role': 'agent', 'token': 'secret'}))
                 accepted = json.loads(await ws.recv())
                 assert accepted['type'] == 'accepted'
-                await ws.send(json.dumps({'type': 'report', 'data': {
-                    'cpu_usage_percent': 12.5,
-                    'mem_total_mb': 1024,
-                    'mem_used_mb': 512,
-                    'os': 'Linux',
-                }}))
+                await ws.send(json.dumps({'type': 'report', 'data': report()}))
                 await asyncio.sleep(0.1)
                 state = json.loads(hub.STATE_PATH.read_text())
                 assert state['n1']['cpu_usage_percent'] == 12.5
 
                 hub.CONFIG_PATH.write_text(json.dumps({'nodes': []}))
                 await asyncio.sleep(hub.MIN_REPORT_INTERVAL)
-                await ws.send(json.dumps({'type': 'report', 'data': {'cpu_usage_percent': 1}}))
+                await ws.send(json.dumps({'type': 'report', 'data': report(cpu=1, ts=2)}))
                 try:
                     await ws.recv()
                 except websockets.exceptions.ConnectionClosed as exc:
@@ -69,7 +78,9 @@ async def main():
             async with websockets.connect('ws://127.0.0.1:18091') as ws:
                 await ws.send(json.dumps({'role': 'agent', 'token': 'secret'}))
                 await ws.recv()
-                await ws.send('{"type":"report","data":{"cpu_usage_percent":1e309}}')
+                bad = report()
+                bad['cpu_usage_percent'] = float('inf')
+                await ws.send(json.dumps({'type': 'report', 'data': bad}))
                 try:
                     await ws.recv()
                 except websockets.exceptions.ConnectionClosed as exc:

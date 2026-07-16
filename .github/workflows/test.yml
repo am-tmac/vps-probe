@@ -18,6 +18,7 @@ jobs:
       - run: python -m pip install pytest websockets==10.4
       - run: python -m pytest -q
       - run: python tests/integration_smoke.py
+      - run: python tests/installer_transaction_test.py
       - run: bash -n install.sh
       - run: python -m py_compile panel.py ws_hub.py agent/vps-probe-agent.py validate_config.py tests/*.py
       - run: python -m json.tool config.example.json >/dev/null

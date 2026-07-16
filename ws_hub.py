@@ -32,6 +32,10 @@ INTEGER_FIELDS = {
     'tx_speed_bps', 'tcp_count', 'udp_count', 'process_count', 'ts',
 }
 FLOAT_FIELDS = {'load1'}
+REQUIRED_REPORT_FIELDS = {
+    'uptime_sec', 'cpu_usage_percent', 'mem_total_mb', 'mem_used_mb',
+    'disk_percent', 'net_rx_bytes', 'net_tx_bytes', 'ts',
+}
 MAX_INTEGER = 2 ** 63 - 1
 
 
@@ -146,6 +150,9 @@ def _number(value, field, *, integer=False, minimum=0, maximum=MAX_INTEGER):
 def clean_report(data):
     if not isinstance(data, dict):
         raise ValueError('report data must be an object')
+    missing = sorted(REQUIRED_REPORT_FIELDS - data.keys())
+    if missing:
+        raise ValueError(f'missing required report fields: {", ".join(missing)}')
     clean = {}
     for field in STRING_FIELDS:
         if field in data:
